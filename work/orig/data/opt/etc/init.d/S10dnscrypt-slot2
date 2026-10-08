@@ -1,0 +1,86 @@
+#!/bin/sh
+
+# All state writers share one lock; nested calls retain its owner token.
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+
+# Второй dnscrypt-proxy — DNS доменов slot-2 (страна выхода :1099).
+# Не rc.func: общий PROCS=dnscrypt-proxy остановил бы оба процесса.
+#
+# Запускаем под ДРУГИМ именем процесса (dnscrypt-slot2): Entware-скрипт
+# S09dnscrypt-proxy2 работает через `pidof dnscrypt-proxy` / `killall` —
+# с общим именем его `start` считал главный dnscrypt уже запущенным (пока
+# жив slot-2), а `restart` убивал оба. busybox pidof смотрит и на цель
+# /proc/PID/exe, поэтому symlink не годится — нужен hardlink (или копия).
+
+ENABLED=yes
+REAL_BIN=/opt/sbin/dnscrypt-proxy
+BIN=/opt/sbin/dnscrypt-slot2
+CFG=/opt/etc/dnscrypt-proxy-slot2.toml
+PIDF=/opt/var/run/dnscrypt-slot2.pid
+LOG=/opt/tmp/dnscrypt-slot2.log
+
+is_up() {
+    [ -f "$PIDF" ] || return 1
+    pid=$(cat "$PIDF")
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qF -- "$CFG"
+}
+
+ensure_link() {
+	[ -x "$REAL_BIN" ] || return 1
+	# тот же inode (hardlink) — актуально и после opkg upgrade dnscrypt-proxy2
+	if [ -e "$BIN" ] && [ ! -L "$BIN" ] && [ "$BIN" -ef "$REAL_BIN" ]; then
+		return 0
+	fi
+	rm -f "$BIN"
+	ln "$REAL_BIN" "$BIN" 2>/dev/null || cp "$REAL_BIN" "$BIN" || return 1
+	chmod +x "$BIN"
+}
+
+start() {
+    [ -s /opt/etc/pivas-slot2.list ] || return 0
+    [ -f /opt/etc/pivas.paused ] && return 0
+	ensure_link && [ -f "$CFG" ] || return 0
+	is_up && return 0
+	mkdir -p /opt/var/run /opt/tmp
+	# лог не должен расти бесконечно
+	[ "$(ls -ln "$LOG" 2>/dev/null | awk '{print $5}')" -gt 1048576 ] 2>/dev/null && : > "$LOG"
+	PIVAS_LOCK_TOKEN= PIVAS_LOCK_ENTRY= "$BIN" -config "$CFG" >>"$LOG" 2>&1 &
+	echo $! > "$PIDF"
+	sleep 1
+	is_up
+}
+
+stop() {
+	if is_up; then
+		kill "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null || true
+		rm -f "$PIDF"
+	fi
+	# страховка: и старые процессы под именем dnscrypt-proxy, и новые dnscrypt-slot2
+	for pid in $(pidof dnscrypt-proxy dnscrypt-slot2 2>/dev/null); do
+		tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null | grep -q dnscrypt-proxy-slot2.toml \
+			&& kill "$pid" 2>/dev/null || true
+	done
+}
+
+status() {
+	if is_up; then
+		echo "dnscrypt-slot2: alive"
+	else
+		echo "dnscrypt-slot2: dead"
+	fi
+}
+
+restart() { stop; sleep 1; start; }
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload) restart ;;
+	status) status ;;
+	*) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

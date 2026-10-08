@@ -1,0 +1,10 @@
+{
+  "name": "pivas-development",
+  "private": true,
+  "scripts": {
+    "test:web": "node tests/web_e2e.cjs && node tests/web_style.cjs && node tests/web_slot_names.cjs && node tests/web_hysteria.cjs && node tests/web_xhttp.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

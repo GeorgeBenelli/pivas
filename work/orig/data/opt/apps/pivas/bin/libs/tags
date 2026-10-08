@@ -1,0 +1,430 @@
+#!/bin/sh
+# ------------------------------------------------------------------------------------------
+#
+# 	ПРОЕКТ ПИВАС
+#
+# 	Данный файл служит для обработки тегов
+#   Реализованы такие функции:
+#		- получение списка тегов
+#		- получение списка доменных имен по тегу
+#		- добавление доменного имени по тегу в список
+#		- удаление доменного имени по тегу из списка
+#
+# ------------------------------------------------------------------------------------------
+#
+#	Дата: 02/08/2024
+#	Лицензия: Apache License 2.0
+#
+# ------------------------------------------------------------------------------------------
+
+# . /opt/apps/pivas/bin/libs/main
+
+# Файл с тегами
+TAGS_FILE=/opt/apps/pivas/etc/conf/tags.list
+PIVAS_LIST_FILE=/opt/etc/pivas.list
+
+# ------------------------------------------------------------------------------------------
+#
+# 	Получаем список тегов и доменов
+#
+# ------------------------------------------------------------------------------------------
+cmd_show_tags_domain_list(){
+
+    section="$1"
+
+    if [ -z "$section" ] ; then
+        _list=$(cat < "${TAGS_FILE}")
+    else
+        grep -q "\[$section\]" "${TAGS_FILE}" || {
+            error "Пиваска '$section' не обнаружена!"
+            return 1
+        }
+        _list=$(get_tag_domain_list "$section")
+
+    fi
+
+
+    echo -e "${GREEN}Список доменных имен в пивасках:${NOCL}"
+    print_line
+    [ -n "$section" ] && echo -e "${GREEN}[$section]${NOCL}"
+
+    IFS=$'\n'
+    for line in $_list; do
+        if [[ "$line" =~ \[.*?\] ]]; then
+            echo -e "  $line"
+        else
+            echo ''
+            echo -e "${GREEN}${line}${NOCL}"
+
+        fi
+    done
+    unset IFS
+
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+# 	Получаем список тегов
+#
+# ------------------------------------------------------------------------------------------
+get_tags_list(){
+    cat < "${TAGS_FILE}" | grep -vE '^#|^$' | grep "\[" | grep "\]" | tr -d ']['
+}
+
+# ------------------------------------------------------------------------------------------
+#
+# 	Получаем список доменных имен по тегу
+#
+# ------------------------------------------------------------------------------------------
+get_tag_domain_list(){
+    awk -v section="$1" '/\['"$1"'\]/{flag=1; next} /\[.*\]/{flag=0} flag' "${TAGS_FILE}"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+# 	Получаем первый домен из списка доменных имен по тегу
+#
+# ------------------------------------------------------------------------------------------
+get_first_domain_from_section() {
+    get_tag_domain_list "$1" | head -n 1
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#   Функция для проверки наличия секции в файле
+#
+# ------------------------------------------------------------------------------------------
+_check_section() {
+
+    local section="$1"
+    if ! grep -q "\[$section\]" "${TAGS_FILE}"; then
+        read_ynq "Пиваска '$section' не найдена. Добавить?" answer
+        if [[ "$answer" =~ [qn] ]] ; then return 1;
+        elif [[ "$answer" =~ [y] ]] ; then
+            echo -e "\n[$section]" >> "${TAGS_FILE}"
+        fi
+        print_line
+
+    fi
+
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#   Функция для получения имени тега по имени домена
+#
+# ------------------------------------------------------------------------------------------
+_get_tagname_by_domain() {
+    local domain_name=$1
+
+    # Найти строку с доменом и получить строки до этой строки, затем найти последний тег перед доменом
+    sed -n "/^$domain_name$/=" "$TAGS_FILE" | while read -r line_number; do
+        sed -n "1,${line_number}p" "$TAGS_FILE" | grep -oP '^\[\K[^\]]+' | tail -1
+    done
+
+}
+# ------------------------------------------------------------------------------------------
+#
+#   Функция возврщает список доменных имен, помеченных одним тегом и
+#   которых нет в защитном списке
+#
+# ------------------------------------------------------------------------------------------
+_get_same_tag_domains_missing_in_protection_list() {
+
+    local domain="$1"
+    local tagname=$(_get_tagname_by_domain "${domain}" | tail -1)
+    local _list=""
+
+    get_tag_domain_list "$tagname" | while read -r line; do
+        local _host=$(grep "^$line$" "${PIVAS_LIST_FILE}")
+        if [ -n "$_host" ]; then
+            _list="${_list} ${line}"
+        fi
+    done
+
+    echo "${_list}"
+}
+# ------------------------------------------------------------------------------------------
+#
+#   Функция для проверки домена на наличие доменной зоны
+#
+# ------------------------------------------------------------------------------------------
+_check_domain_zone() {
+    local domain="$1"
+
+    # Проверка на наличие доменной зоны
+    echo "$domain" | grep -qE "\.[a-zA-Z]{2,6}$" || {
+        warning "Неверный формат домена."
+        warning "Должна быть указана доменная зона (например, .com, .ru, .org)."
+        return 1
+    }
+
+
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#   Функция для добавления домена в секцию
+#
+# ------------------------------------------------------------------------------------------
+cmd_add_domain_to_tag_list() {
+
+    local section="$1"
+    local domain="$2"
+
+    _check_domain_zone "${domain}" || return 1
+    _check_section "$section" || return 1
+
+    get_tag_domain_list "$section" | grep -q "^$domain$" && {
+         warning "Домен '$domain' уже есть в пиваске '$section'."
+         warning "Пропускаем добавление домена в пиваску '$section'..."
+        return 1
+    }
+
+    ready "Домен '$domain' добавлен в пиваску '$section'."
+    if sed -i "/\[$section\]/a $domain" "${TAGS_FILE}" ;
+    then when_ok "УСПЕШНО";
+    else when_bad "ОШИБКА"; fi
+}
+
+# -------------------------------------------------------------------------------------------
+#
+#   Функция для удаления домена из секции
+#
+# ------------------------------------------------------------------------------------------
+cmd_del_domain_from_tag_list() {
+
+    local section="$1"
+    local domain="$2"
+
+    # Если задана только секция - удаляем все домены в этой секции
+    if [ -z "${domain}" ] ; then
+        read_ynq "Будут удалены все домены с пиваской '$section' и само имя пиваски.\nВы уверены?" answer
+        if [[ "$answer" =~ [qn] ]] ; then return 1; fi
+        [ "${answer}" = y ] && {
+            sed -i "/\[$section\]/,/\[.*\]/ { /.*$/d }" "${TAGS_FILE}"
+        }
+        return
+    else
+
+        _check_domain_zone "${domain}" || return 1
+
+        grep -q "\[$section\]" "${TAGS_FILE}" || {
+            echo "Пиваска '$section' не найдена."
+            return 1
+        }
+
+
+        if ! grep -q "^$domain$" "${TAGS_FILE}"; then
+            error "Домен '$domain' не обнаружен в пиваске '$section'."
+            return 1
+        fi
+
+        sed -i "/\[$section\]/,/\[.*\]/ { /^$domain$/d }" "${TAGS_FILE}"
+    fi
+}
+
+
+# --------------------------------------------------------------------------------------------
+#
+#   Функция для проверки наличия элементов тега в списке pivas
+#
+# ------------------------------------------------------------------------------------------
+has_section_domains_in_list() {
+#set -exu
+    local section="$1"
+    local action="${2}"
+    _check_section "$section" || return 1
+
+    local all_present=true
+    local none_present=true
+    local partial_present=false
+    local missing_elements=""
+
+    [ -f "${PIVAS_LIST_FILE}" ] || {
+        # error "Файл '${PIVAS_LIST_FILE}' не найден."
+        when_bad "ОШИБКА"
+        return 1
+    }
+
+    for domain in $(get_tag_domain_list "$section" | sed -e 's/^[[:space:]]*//; s/[[:space:]]*$//' ); do
+# echo "$domain"
+        if grep -q "^$domain$" "${PIVAS_LIST_FILE}" ; then
+            none_present=false
+            #[ "$action" = "del" ] && none_present=true
+        else
+            all_present=false
+            #[ "$action" = "del" ] && all_present=true
+            missing_elements="${missing_elements}$domain "
+        fi
+
+    done
+#echo "missing_elements=$missing_elements"
+    if $all_present; then
+        # when_ok "ДОБАВЛЕНА"
+        echo 1
+    elif $none_present; then
+        # when_bad "ОТСУТСТВУЕТ"
+        echo 2
+    else
+        # when_alert "ЧАСТИЧНО"
+        echo 3
+    fi
+# set +exu
+}
+
+# --------------------------------------------------------------------------------------------
+#
+#   Функция для выбора секции из списка
+#
+# ------------------------------------------------------------------------------------------
+tag_select() {
+
+    local tags="$(get_tags_list)"
+    local action="$1"
+
+    echo -e "Список пивасок для ${BLUE}${action}${NOCL}:"
+
+    if [ -z "${action}" ] ; then
+        error "Не задан режим работы функции tag_select."
+        return 1
+    fi
+
+    if [ "${action}" = "добавления" ] ; then action="add"; else action="del"; fi
+
+
+    print_line
+    local i=0
+    local added_list=""
+    local ask_list=""
+
+#set -xeu
+    while IFS= read -r tag; do
+
+        local res=$(has_section_domains_in_list "$tag" "$action")
+
+        if [ ${res} -gt 1 ] ; then
+
+            if [ "${action}" = "add" ] ; then
+		        i=$((i+1))
+                ask_list="${ask_list}$(ready "$i. $tag")"
+                [ "${res}" -eq 2 ] && ask_list="${ask_list}$(when_bad "ОТСУТСТВУЕТ")"
+                [ "${res}" -eq 3 ] && ask_list="${ask_list}$(when_alert "ЧАСТИЧНО")"
+                ask_list="${ask_list}\n"
+
+            else
+                if [ "${res}" -eq 2 ]; then
+                    # Переводим в список отсутсвующих
+                    #res=1
+                    added_list="${added_list}$(ready "$tag")"
+                    added_list="${added_list}$(when_alert "ОТСУТСТВУЕТ")\n"
+                else
+                    i=$((i+1))
+                    ask_list="${ask_list}$(ready "$i. $tag")"
+                    ask_list="${ask_list}$(when_alert "ЧАСТИЧНО")"
+                    ask_list="${ask_list}\n"
+                fi
+            fi
+
+        fi
+        if [ ${res} = 1 ]; then
+            # если домен уже есть в списке
+            if [ "${action}" = "add" ] ; then
+                added_list="${added_list}$(ready "$tag" && when_ok "ДОБАВЛЕН")\n"
+            else
+                i=$((i+1))
+                ask_list="${ask_list}$(ready "$i. $tag")"
+                if [ "${res}" -eq 1 ]; then
+                    ask_list="${ask_list}$(when_bad "В СПИСКЕ")\n"
+                fi
+            fi
+        fi
+    done <<EOF
+$tags
+EOF
+
+
+#set -xeu
+    	[ -n "${added_list}" ] && {
+        	echo -e "${added_list}" | sed '/^$/d'
+        	[ -n "${ask_list}" ] && print_line
+    	}
+    	[ -n "${ask_list}" ] && {
+            echo -e "${ask_list}" | sed '/^$/d'
+        }
+
+#    score=$(echo -e "${ask_list}" | wc -l)
+
+    if [ "$i" -gt 0 ]; then
+        print_line
+        while true; do
+	    local choice
+            read -p "Выберите номер пиваски из списка [1-$i], A:Все, Q:Выход: " choice
+
+            [[ "${choice}" =~ [qQ] ]] && return 0
+            [[ "${choice}" =~ [aA] ]] && break
+#set -xeu
+           # Проверка на ввод только цифр и в пределах диапазона
+            if [[ "${choice}" =~ ^[0-9]+$ ]] && [ ${choice} -ge 1 ] && [ ${choice} -le ${i} ]; then
+                break
+            else
+                error "Неверный ввод. Пожалуйста, введите номер из списка."
+            fi
+
+        done
+#set -xeu
+        if [[ "${choice}" =~ [aA] ]] ; then
+            # если выбрано все
+            eval "$2=ALL"
+        else
+	    #local _list=$([ "${action}" = add ] && echo "${ask_list}" || echo "${added_list}")
+            chosen_tag=$(echo -e "${ask_list}" | sed -n $choice'p' | sed 's/^[0-9]\{1,3\}. \(.*\) .* .*$/\"\1\"/; /^$/d' | tr -d ' ' )
+            eval "$2=$chosen_tag"
+        fi
+
+    else
+        if [  $(cat < "${TAGS_FILE}" | wc -l) -le 1 ] ; then 
+            error "Список пивасок пуст.\nПроверьте наличие пивасок в файле '${TAGS_FILE}'."
+        else 
+            print_line
+            error "Пивасок для удаления не найдено."
+        fi
+    fi
+#set +xeu
+}
+
+# --------------------------------------------------------------------------------------------
+#
+#   Функция для обновления списка пивасок с github
+#
+# ------------------------------------------------------------------------------------------
+cmd_update_tags_domain_list() {
+
+    local _force=${1:-no}
+    ready "Обновление списка пивасок с ${BLUE}GitHub${NOCL}  прошло" 
+
+    curl -so /opt/tmp/tags.list https://127.0.0.1/tags.list.disabled && when_ok "УСПЕШНО" || {
+        error "Не удалось обновить список пивасок с ${BLUE}GitHub${NOCL}."
+        error "Пожалуйста, проверьте интернет соединение."
+        return 1
+    }
+    
+    if [ "${_force}" = force ] ; then
+        mv -f /opt/tmp/tags.list /opt/apps/pivas/etc/conf/tags.list
+    else
+        local _diff=$(diff /opt/apps/pivas/etc/conf/tags.list  /opt/tmp/tags.list  | grep -E '^\+\[' | tr -d +)
+        if [ -n "${_diff}" ] ; then
+            print_line
+            echo -e "В список были добавлены следущие пиваски:\n${_diff}"
+            print_line
+            printf "%s" "${_diff}"
+            mv -f /opt/tmp/tags.list /opt/apps/pivas/etc/conf/tags.list
+        else
+            print_line
+            echo -e "В удаленном списке на ${BLUE}GitHub${NOCL} новых пивасок ${RED}не обнаружено${NOCL}."
+            rm -f /opt/tmp/tags.list
+        fi
+
+    fi
+}

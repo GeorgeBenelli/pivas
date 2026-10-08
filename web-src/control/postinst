@@ -1,0 +1,37 @@
+#!/bin/sh
+chmod +x /opt/etc/init.d/S99pivas-web
+chmod +x /opt/etc/pivas-web/setpass
+chmod -R +x /opt/etc/pivas-web/www/cgi-bin/
+
+# Удаляем хвост от старой experimental per-device UI. В актуальной сборке
+# управление клиентами убрано, а opkg не всегда чистит файлы, исчезнувшие
+# из нового data.tar.gz при force-reinstall.
+rm -f /opt/etc/pivas-web/www/cgi-bin/clients.sh
+
+# Restore a web service with an existing enabled marker after later upgrades.
+# A clean install has no marker and therefore does not start a process.
+if [ -f /opt/etc/pivas-web/enabled ]; then
+  /opt/etc/init.d/S99pivas-web start || true
+fi
+
+cat <<MSG
+
+====================================================================
+  pivas-web установлен
+
+  Веб-интерфейс ВЫКЛЮЧЕН по умолчанию и после перезагрузки.
+
+  1) Задать пароль для доступа (логин всегда admin):
+       /opt/etc/pivas-web/setpass <ваш_пароль>
+
+  2) Включить:
+       pivas web on
+     (или кнопкой «Веб: включить» в Telegram-боте)
+
+  3) Открыть с любого устройства в LAN:
+       http://ip_роутера:8888
+
+  Выключить: pivas web off (или кнопкой в боте)
+====================================================================
+MSG
+exit 0

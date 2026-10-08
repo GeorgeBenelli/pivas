@@ -1,0 +1,20 @@
+#!/bin/sh
+
+# Explicit full stop persists over reboot; normal pause retains bot transport.
+case "${1:-}" in
+    start|restart|reload)
+        [ ! -f /opt/etc/pivas.xray-stopped ] || exit 0
+        if [ -f /opt/apps/pivas/bin/main/vless_url.py ]; then
+            /opt/bin/python3 /opt/apps/pivas/bin/main/vless_url.py migrate /opt/etc/xray/pivas.json >/dev/null || exit 1
+        fi
+        ;;
+esac
+
+ENABLED=yes
+PROCS=xray
+ARGS="run -confdir /opt/etc/$PROCS"
+PREARGS=""
+DESC=$PROCS
+PATH=/opt/sbin:/opt/bin:/opt/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+. /opt/etc/init.d/rc.func

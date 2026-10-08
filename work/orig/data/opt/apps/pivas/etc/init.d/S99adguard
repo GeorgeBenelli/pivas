@@ -1,0 +1,62 @@
+#!/bin/sh
+#------------------------------------------------------------------------------
+#	ПАКЕТ ПИВАС
+#------------------------------------------------------------------------------
+#
+#	Данный файл служит для запуска AdguardHome соместно с пакетом ПИВАС
+#	1. Создает новую таблицу ipset под названием pivas
+#	2. Обновляет таблицу ipset данными из файла с доменными именами, IP и сетями
+#
+#	Файл содержит основные аргументы запуска AdguardHome,
+#	основные из которых являются:
+#	1. Файл конфигурации
+#	2. Файл журналирования
+#	3. Папка из которой запускается пакет
+#
+# ------------------------------------------------------------------------------
+#	Дата создания: 21/05/2022
+#	Лицензия: Apache License 2.0
+# ------------------------------------------------------------------------------
+
+PIDFILE="/opt/var/run/AdGuardHome.pid"
+CNF="-c /opt/etc/AdGuardHome/AdGuardHome.yaml"
+DIR="-w /opt/etc/AdGuardHome"
+LOG="-l /opt/var/log/AdGuardHome.log"
+PID="--pidfile ${PIDFILE}"
+UPD="--no-check-update"
+OPT="${DIR} ${LOG} ${PID} ${CNF}"
+
+ENABLED=yes
+PROCS=AdGuardHome
+ARGS="${OPT}"
+PREARGS=""
+DESC=${PROCS}
+PATH=/opt/sbin:/opt/bin:/opt/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+case ${1} in
+        start|restart)
+                . /opt/apps/pivas/bin/libs/vpn
+                cmd_pivas_init initd
+                ready "Перезапускаем AdGuardHome"
+                . /opt/etc/init.d/rc.func &>/dev/null
+                sleep 1
+		if [ -f "${PIDFILE}" ]; then
+                        when_ok "УСПЕШНО"
+                        print_line
+                else
+                        when_bad "ОШИБКА"
+                        print_line
+                        error 'Возникли проблемы при запуске AdGuardHome.' nol
+                        error 'Смотрите журнал запуска ниже.' nol
+                        print_line
+                        sleep 3
+                        cat < "${ADGUARDHOME_LOG}" | tail | grep error
+                fi
+
+        ;;
+
+        *)
+                . /opt/etc/init.d/rc.func
+        ;;
+esac
+
+

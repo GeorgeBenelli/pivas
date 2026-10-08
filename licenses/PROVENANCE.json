@@ -1,0 +1,18 @@
+{
+  "checked_on": "2026-10-09",
+  "telegram4kvas": {
+    "tree_sha": "02180891ce41e5a617ee827612768729b175c556",
+    "tree_url": "https://api.github.com/repos/dnstkrv/telegram4kvas/git/trees/main?recursive=1",
+    "license_files_found": [],
+    "status": "license/redistribution permission unresolved"
+  },
+  "pyTelegramBotAPI": {
+    "license_url": "https://raw.githubusercontent.com/eternnoir/pyTelegramBotAPI/master/LICENSE",
+    "license": "GPL-2.0",
+    "vendored_release_tag": "not recorded in inherited source; do not infer from current master"
+  },
+  "KVAS": {
+    "license_url": "https://raw.githubusercontent.com/qzeleza/kvas/main/LICENCE.md",
+    "license": "Apache-2.0"
+  }
+}

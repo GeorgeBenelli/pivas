@@ -1,0 +1,14 @@
+Package: pivas
+Version: 1.1.9_beta-10-25-custom25
+Depends: xray-core (>= 26.3.27-1), pivas-quic-probe, ca-bundle, openssl-util, python3-base, python3-light, libc, libssp, librt, libpthread, libpcre, jq, curl, knot-dig, nano-full, cron, bind-dig, dnsmasq-full, ipset, dnscrypt-proxy2, iptables, shadowsocks-libev-ss-redir, shadowsocks-libev-config, libmbedtls
+Source: work/orig
+SourceName: pivas
+Section: utils
+SourceDateEpoch: 1737175683
+URL: no
+Architecture: all
+Installed-Size: 583680
+Description:  Данный пакет позволяет осуществлять контроль и поддерживать в актуальном состоянии
+ защищенный список хостов или "Белый список". При обращении к любому хосту из
+ этого списка, весь трафик будет идти через любое VPN или через Shadowsocks соединение,
+ заранее настроенное на роутере.

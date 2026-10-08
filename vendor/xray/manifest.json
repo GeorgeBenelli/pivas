@@ -1,0 +1,43 @@
+{
+  "version": "26.3.27",
+  "assets": {
+    "mipsel-3.4": {
+      "url": "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-mips32le.zip",
+      "archive_sha256": "fe1ded07a64fe0a406c6c1089f09b6c2999fc2309509ca4c98d93469c0cbf9df",
+      "member": "xray_softfloat",
+      "binary_sha256": "ddd64ac20ac6e9d949d5674fb3fb13e771eaac7eedc736f9616c375776337738",
+      "size": 34406557,
+      "elf_class": 1,
+      "elf_machine": 8,
+      "go": "1.26.6",
+      "float": "softfloat",
+      "upstream_binary_sha256": "fa0f56237e221793a527f5fdbe192e25960dd1ad57103c4c3ff17a386c0b448f",
+      "origin": "source-build",
+      "compiler": "go version go1.26.6 darwin/arm64",
+      "source_url": "https://codeload.github.com/XTLS/Xray-core/tar.gz/refs/tags/v26.3.27",
+      "source_sha256": "992a4997e6bb846d11469435d687f99ef812fcde1e0a009bb8e95189ea20331d",
+      "build_flags": [
+        "-trimpath",
+        "-buildvcs=false",
+        "-gcflags=-l=4",
+        "-ldflags=-X github.com/xtls/xray-core/core.build=pivas-26.3.27-go1.26.6 -s -w -buildid="
+      ]
+    },
+    "aarch64-3.10": {
+      "url": "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-arm64-v8a.zip",
+      "archive_sha256": "4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c",
+      "member": "xray",
+      "binary_sha256": "c2d20a7045250497083afea0d79db0672f6c89a25aaaf37c92de034d6b764b04",
+      "size": 34209918,
+      "elf_class": 2,
+      "elf_machine": 183,
+      "go": "1.26.1",
+      "float": null
+    }
+  },
+  "notices": {
+    "LICENSE": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5",
+    "README.md": "d83daf86fd411e33762c42cb2e49a0b114de44604e26c126cc72b60e63646d2f",
+    "GO-LICENSE": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+  }
+}

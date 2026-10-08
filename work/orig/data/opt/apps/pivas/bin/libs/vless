@@ -1,0 +1,1401 @@
+#!/bin/sh
+# ------------------------------------------------------------------------------------------
+#
+# 	ПРОЕКТ ПИВАС
+#
+# 	Данный файл служит для поддержки vless протокола
+#   Реализованы такие функции:
+#		- получение списка тегов
+#		- получение списка доменных имен по тегу
+#		- добавление доменного имени по тегу в список
+#		- удаление доменного имени по тегу из списка
+#
+# ------------------------------------------------------------------------------------------
+#
+#	Дата: 09/09/2024
+#	Лицензия: Apache License 2.0
+#
+# ------------------------------------------------------------------------------------------
+
+. /opt/apps/pivas/bin/libs/main
+
+XRAY=/opt/sbin/xray
+XRAY_INIT=/opt/etc/init.d/S24xray
+
+VLESS_CONFIG_FILE=/opt/etc/xray/pivas.json
+VLESS_CONFIG_ORIGINAL_FILE=/opt/apps/pivas/etc/conf/pivas.vless
+# Per-slot бэкапы (старый VLESS_CONFIG_FILE_BACKUP оставлен для совместимости).
+VLESS_CONFIG_FILE_BACKUP=${PIVAS_BACKUP_PATH}/pivas.json
+VLESS_BACKUP_SLOT1=${PIVAS_BACKUP_PATH}/pivas.json.slot1
+VLESS_BACKUP_SLOT2=${PIVAS_BACKUP_PATH}/pivas.json.slot2
+VLESS_SLOT_BOT=2
+VLESS_SLOT2_DOMAINS_FILE=/opt/etc/pivas-slot2.list
+
+PROXY_VLESS_DESC="Pivas-proxy-vless"
+PROXY_LOCAL_IP="127.0.0.1"
+PROXY_VLESS_PORT=1097
+PROXY_VLESS_PROTO=socks5
+DOMAIN_FOR_CHECK="ifconfig.me"
+
+
+has_package_installed() {
+#-------------------------------------------------------------------------------
+#
+#	Функция проверяет установлен ли пакет Proxy
+#
+#-------------------------------------------------------------------------------
+    grep -q "<name>${1}</name>" /etc/components.xml
+}
+
+has_package_uninstalled() {
+#-------------------------------------------------------------------------------
+#
+#       Функция проверяет установлен ли пакет Proxy
+#
+#-------------------------------------------------------------------------------
+    ! grep -q "<name>${1}</name>" /etc/components.xml
+}
+
+has_xray_enable(){
+#-------------------------------------------------------------------------------
+#
+#	Функция проверяет, включен ли Xray
+#
+#-------------------------------------------------------------------------------
+    # [ -x "${XRAY}" ] && [ -f "${XRAY_INIT}" ] && [ "$("${XRAY_INIT}" status)" = 'alive' ]
+    [ -f "${XRAY_INIT}" ] && [ "$("${XRAY_INIT}" status)" = 'alive' ]
+}
+
+has_proxy_inface_selected(){
+#-------------------------------------------------------------------------------
+#
+#	Функция проверяет, является ли интерфейс Proxy Vless Pivas
+#   выбранным соединением или нет
+#
+#-------------------------------------------------------------------------------
+    proxy_entware_id=$(get_config_value INFACE_ENT)
+    [ "${proxy_entware_id}" = "${PROXY_VLESS_NAME}" ]
+
+}
+
+api_post_query(){
+#-------------------------------------------------------------------------------
+#
+#	Функция отправляет запросы к API Keenetic
+#
+#-------------------------------------------------------------------------------
+
+	local _data=${1}
+    local _query=${2:-}
+	local _result
+
+	if [ -z "${_data}" ]; then
+		curl -s "localhost:79/rci/${_query}"
+	else
+		curl -s -d "${_data}" "localhost:79/rci/${_query}"
+	fi
+
+}
+
+api_get_query(){
+#-------------------------------------------------------------------------------
+#
+#	Функция отправляет запросы к API Keenetic
+#
+#-------------------------------------------------------------------------------
+
+    local _query=${1}
+    local _result
+    curl -s "localhost:79/rci/${_query}"
+
+}
+
+_vless_invalid() {
+#-------------------------------------------------------------------------------
+#   Выводит единообразный баннер про невалидную ссылку + описание причины.
+#   Без print_line — обрамление рисует вызывающая команда (pivas dispatcher).
+#-------------------------------------------------------------------------------
+    local reason="$1"
+    echo -e "${RED}Ссылка не принята:${NOCL} ${reason}"
+    echo -e "${BLUE}Ожидаемый формат:${NOCL}"
+    echo "  vless://UUID@host:443?type=tcp&security=reality&pbk=...&sni=...&fp=firefox&flow=xtls-rprx-vision"
+    echo "  vless://UUID@host:443?type=grpc&security=tls&sni=...&serviceName=..."
+    echo "  hysteria2://password@host:443/?sni=...&obfs=salamander&obfs-password=..."
+    echo "Reality требует pbk; gRPC и XHTTP требуют пустой flow."
+}
+
+
+#===============================================================================
+#   pivas_vless_ping — проверяет живость обоих VLESS-слотов.
+#
+#   slot-1 → SOCKS5 127.0.0.1:1097 (трафик маршрутизируется в slot-1 outbound)
+#   slot-2 → HTTP   127.0.0.1:1098 (трафик в slot-2)
+#
+#   Делает HTTPS-запрос на ifconfig.me через каждый прокси с таймаутом 6с,
+#   печатает exit-IP и latency. Если прокси мёртв (timeout / refused) — выводит
+#   причину.
+#===============================================================================
+pivas_vless_ping() {
+    # Два измерения на слот:
+    #  net — чистый TCP-connect до host:port VLESS-сервера (как Happ на iPhone)
+    #  e2e — HTTPS через xray-inbound → VLESS+Reality → cp.cloudflare.com/204
+    local TARGET="https://cp.cloudflare.com/generate_204"
+    local CONNECT_TO=4 TOTAL_TO=6
+    print_line
+    echo -e "${GREEN}Проверка слотов${NOCL}"
+    echo -e "  ${BLUE}net${NOCL} — TCP-ping до сервера (как Happ)"
+    echo -e "  ${BLUE}e2e${NOCL} — HTTPS через Xray (полный путь); Hysteria 2 использует QUIC"
+    print_line
+
+    _get_hostport() {
+        [ -f /opt/etc/xray/pivas.json ] || return
+        jq -r --arg tag "slot-$1" \
+            '.outbounds[] | select(.tag==$tag) | (if .protocol=="hysteria" then .settings else .settings.vnext[0] end) | (if (.address//""|contains(":")) then "["+.address+"]" else (.address//"") end) + ":" + (.port|tostring)' \
+            /opt/etc/xray/pivas.json 2>/dev/null
+    }
+
+    _net_ms() {
+        local hostport=$1 host port t
+        [ -z "$hostport" ] || [ "$hostport" = ":" ] && { echo "—"; return; }
+        host=${hostport%:*}
+        port=${hostport##*:}
+        t=$(curl -s -k -o /dev/null \
+              --connect-timeout "$CONNECT_TO" --max-time "$CONNECT_TO" \
+              -w '%{time_connect}' "https://${host}:${port}/" 2>/dev/null)
+        awk -v t="$t" 'BEGIN{if(t+0==0){print "timeout"}else{printf "%dмс", t*1000}}'
+    }
+
+    _probe_slot() {
+        local slot=$1 proxy=$2 hostport net out rc code ttot e2e
+        hostport=$(_get_hostport "$slot")
+        if jq -e --arg tag "slot-$slot" '.outbounds[] | select(.tag==$tag) | .protocol=="hysteria"' "$VLESS_CONFIG_FILE" >/dev/null 2>&1; then
+            net="QUIC"
+        else
+            net=$(_net_ms "$hostport")
+        fi
+
+        out=$(curl -s -x "$proxy" --max-time "$TOTAL_TO" \
+              -w '\n__meta__ %{http_code} %{time_total}' "$TARGET" 2>/dev/null)
+        rc=$?
+        if [ $rc -eq 0 ]; then
+            code=$(printf '%s\n' "$out" | awk '/^__meta__/ {print $2; exit}')
+            ttot=$(printf '%s\n' "$out" | awk '/^__meta__/ {print $3; exit}')
+            e2e=$(awk -v t="$ttot" 'BEGIN{printf "%d", t*1000}')
+            if [ "$code" = "204" ] || [ "$code" = "200" ]; then
+                # exit-IP отдельным быстрым запросом
+                local ip
+                ip=$(curl -s -x "$proxy" --max-time 4 https://ifconfig.me 2>/dev/null | tr -d '\r\n' | head -c 40)
+                printf "  ${GREEN}✓${NOCL} slot-%s  %-22s  net=%-8s  e2e=%dмс\n" \
+                    "$slot" "$ip" "$net" "$e2e"
+                printf "     ${BLUE}└─${NOCL} сервер: %s\n" "$hostport"
+                return 0
+            fi
+            printf "  ${RED}✗${NOCL} slot-%s  HTTP %s    net=%s  e2e=%dмс\n" \
+                "$slot" "$code" "$net" "$e2e"
+            return 1
+        fi
+        local err
+        case $rc in
+            28) err="timeout ${TOTAL_TO}s" ;;
+            7)  err="xray-прокси не отвечает" ;;
+            *)  err="curl rc=$rc" ;;
+        esac
+        printf "  ${RED}✗${NOCL} slot-%s  %-22s  net=%-8s  e2e=—\n" "$slot" "$err" "$net"
+        [ -n "$hostport" ] && printf "     ${BLUE}└─${NOCL} сервер: %s\n" "$hostport"
+        return 1
+    }
+
+    _probe_slot 1 "socks5h://127.0.0.1:1097"
+    _probe_slot 2 "http://127.0.0.1:1098"
+    print_line
+}
+
+
+pivas_vless_help() {
+#-------------------------------------------------------------------------------
+#   Справка по новым vless-командам двух слотов.
+#-------------------------------------------------------------------------------
+    cat <<'EOF'
+
+УПРАВЛЕНИЕ СЛОТАМИ VLESS (pivas 1.1.9 custom1)
+
+Два outbound-слота внутри xray:
+  slot-1  — основной (обычно быстрый)
+  slot-2  — для Telegram-бота и отдельного списка доменов
+
+Установка ссылок
+  pivas vless set-1 '<vless://...>'     назначить ссылку в slot-1
+  pivas vless set '<vless://...>'       то же, что set-1
+  pivas vless set-2 '<vless://...>'     назначить ссылку в slot-2
+  pivas vless swap                      поменять ссылки slot-1 и slot-2 местами
+  pivas vless show                      показать обе ссылки и slot-2 список
+  pivas vless rollback                  откатить конфиг целиком к бэкапу
+  pivas vless rollback-1                откатить только outbound slot-1
+  pivas vless rollback-2                откатить только outbound slot-2
+
+Назначение доменов
+  pivas vless 1-add <domain>            добавить домен (пойдёт через slot-1,
+                                       это базовый pivas-список)
+  pivas vless 1-del <domain>            убрать домен из VPN-списка полностью
+  pivas vless 1-list                    показать список slot-1 (то же, что pivas show)
+
+  pivas vless 2-add <domain>            привязать домен к slot-2
+                                       (+ добавить в pivas-список автоматически)
+  pivas vless 2-del <domain>            убрать домен из VPN-списка полностью
+                                       (для переноса в slot-1 используйте 1-add)
+  pivas vless 2-list                    показать домены slot-2
+
+Диагностика
+  pivas vless ping                      проверить живость обоих слотов
+                                       (exit-IP + latency через xray)
+
+Обе команды доступны также в Telegram-боте: кнопки
+  «Заменить VLESS-1», «Заменить VLESS-2»,
+  «Slot-2: +домен», «Slot-2: -домен», «Slot-2: список».
+
+Поддерживаются VLESS TCP + Reality (pbk обязателен), gRPC + TLS (без flow),
+XHTTP + TLS/Reality (без flow, path/host/mode/extra),
+Hysteria 2 (hysteria2:// или hy2://, QUIC + TLS, Salamander, смена портов).
+Команды pivas vless set-1/set-2 принимают все эти ссылки.
+EOF
+}
+
+
+_vless_parse_url() {
+    # Общий парсер CLI, веба и бота. Секрет не попадает в ошибки.
+    if ! VLESS_PARSED_OUTBOUND=$(printf '%s' "$1" | /opt/bin/python3 /opt/apps/pivas/bin/main/vless_url.py prepare "${2:-$VLESS_CONFIG_FILE}" 2>&1); then
+        _vless_invalid "$VLESS_PARSED_OUTBOUND"
+        return 1
+    fi
+}
+
+
+_vless_init_config_if_needed() {
+#-------------------------------------------------------------------------------
+#   Копируем шаблон только если живого конфига ещё нет: файла нет, это
+#   старый однослотовый шаблон (@VLESS_*) или нет тегов slot-1/slot-2.
+#   Оставшиеся @SLOT2_* НЕ повод затирать уже заполненный slot-1 —
+#   их снимает _vless_ensure_placeholder_slots_mirrored.
+#-------------------------------------------------------------------------------
+
+    local _file="${1:-$VLESS_CONFIG_FILE}"
+    local need_init=0
+
+    if [ ! -f "$_file" ]; then
+        need_init=1
+    elif grep -qE '@VLESS_' "$_file"; then
+        need_init=1
+    elif ! jq -e '[.outbounds[].tag] | contains(["slot-1","slot-2"])' "$_file" >/dev/null 2>&1; then
+        need_init=1
+    fi
+
+    if [ "$need_init" = "1" ]; then
+        mkdir -p "$(dirname "$_file")" 2>/dev/null
+        cp "$VLESS_CONFIG_ORIGINAL_FILE" "$_file" || {
+            error "Не удалось создать $_file из шаблона $VLESS_CONFIG_ORIGINAL_FILE"
+            return 1
+        }
+        # @VLESS_SSR_PORT в шаблоне обёрнут в кавычки, чтобы шаблон был
+        # валидным JSON. Подставляем число, убирая обрамляющие кавычки.
+        sed -i "s|\"@VLESS_SSR_PORT\"|${PROXY_VLESS_PORT}|g; s|@VLESS_SSR_PORT|${PROXY_VLESS_PORT}|g" "$_file"
+    fi
+    return 0
+}
+
+
+vless_link_parse() {
+#-------------------------------------------------------------------------------
+#   Парсит vless:// и записывает параметры в outbound указанного слота.
+#   Вызов:  vless_link_parse <url> [config_file] [slot]
+#   slot по умолчанию = 1 (обратная совместимость со старым вызовом).
+#-------------------------------------------------------------------------------
+
+    local link="$1"
+    local _vless_file="${2:-$VLESS_CONFIG_FILE}"
+    local slot="${3:-1}"
+    case "$slot" in 1|2) ;; *) error "Некорректный номер слота: $slot (1 или 2)"; return 1 ;; esac
+
+    _vless_parse_url "$link" "$_vless_file" || return 1
+    _vless_init_config_if_needed "$_vless_file" || return 1
+
+    local _tmp
+    _tmp=$(mktemp) || { error "Не удалось создать временный файл"; return 1; }
+    if ! printf '%s' "$VLESS_PARSED_OUTBOUND" | /opt/bin/python3 /opt/apps/pivas/bin/main/vless_url.py replace "$_vless_file" "$slot" > "$_tmp"; then
+        error "Не удалось обновить VLESS-слот"
+        rm -f "$_tmp"
+        return 1
+    fi
+
+    mv "$_tmp" "$_vless_file"
+    _vless_ensure_placeholder_slots_mirrored "$_vless_file"
+    return 0
+}
+
+
+_vless_other_slot() {
+    [ "$1" = "1" ] && echo 2 || echo 1
+}
+
+
+_vless_slot_is_placeholder() {
+#-------------------------------------------------------------------------------
+#   Проверяет, что указанный slot-N ещё не настроен: любое из
+#   address/port/id/network начинается с @ или пусто.
+#   Вызов: _vless_slot_is_placeholder <slot> [config_file]
+#-------------------------------------------------------------------------------
+    local slot="$1"
+    local file="${2:-$VLESS_CONFIG_FILE}"
+    ! /opt/bin/python3 /opt/apps/pivas/bin/main/vless_url.py configured "$file" "$slot" >/dev/null 2>&1
+}
+
+
+_vless_mirror_slot() {
+#-------------------------------------------------------------------------------
+#   Копирует outbound slot-$1 в slot-$2 (с сохранением тега $2).
+#   Вызов: _vless_mirror_slot <from> <to> [config_file]
+#-------------------------------------------------------------------------------
+    local from="$1" to="$2"
+    local file="${3:-$VLESS_CONFIG_FILE}"
+    local _tmp
+    _tmp=$(mktemp) || return 1
+    jq --arg f "slot-${from}" --arg t "slot-${to}" '
+        (.outbounds | map(select(.tag == $f))[0]) as $src
+        | if $src == null then . else
+            .outbounds |= map(
+                if .tag == $t then ($src | .tag = $t) else . end
+            )
+          end
+    ' "$file" > "$_tmp" && mv "$_tmp" "$file"
+}
+
+
+_vless_ensure_placeholder_slots_mirrored() {
+#-------------------------------------------------------------------------------
+#   Если один слот уже с реальной ссылкой, а второй ещё шаблон
+#   (@SLOT2_NETWORK и т.п.) — клонируем заполненный в пустой.
+#   Иначе xray падает: unknown transport protocol: @SLOT2_NETWORK.
+#-------------------------------------------------------------------------------
+    local file="${1:-$VLESS_CONFIG_FILE}"
+    [ -f "$file" ] || return 0
+    if _vless_slot_is_placeholder 1 "$file"; then
+        _vless_slot_is_placeholder 2 "$file" || _vless_mirror_slot 2 1 "$file"
+    elif _vless_slot_is_placeholder 2 "$file"; then
+        _vless_mirror_slot 1 2 "$file"
+    fi
+}
+
+
+_rotate_xray_logs() {
+#-------------------------------------------------------------------------------
+#   /tmp/log/* живёт в RAM на Keenetic. xray-access.log даже в idle растёт
+#   ~1 КБ/мин → за сутки 1 МБ+, за неделю 10 МБ+ и мы теряем tmpfs. Обрезаем.
+#-------------------------------------------------------------------------------
+    local max_kb=5120
+    for f in /tmp/log/xray-access.log /tmp/log/xray-errors.log; do
+        [ -f "$f" ] || continue
+        size=$(du -sk "$f" 2>/dev/null | awk '{print $1}')
+        [ -z "$size" ] && continue
+        if [ "$size" -gt "$max_kb" ]; then
+            # Оставим последние ~1 МБ, остальное отсечём
+            tail -c 1048576 "$f" > "${f}.new" && mv "${f}.new" "$f"
+        fi
+    done
+}
+
+
+_kill_xray_zombies() {
+#-------------------------------------------------------------------------------
+#   Defensive: убиваем ВСЕ процессы xray перед стартом нового.
+#   Upstream S24xray restart может оставить «зомби» при ошибках init.d,
+#   и после 10+ `vless set` накапливается по 100+ МБ RAM впустую.
+#   Проверено: на Keenetic 6499 после N set'ов было N+1 процессов xray.
+#-------------------------------------------------------------------------------
+    local pids
+    pids=$(pidof xray 2>/dev/null)
+    [ -z "$pids" ] && return 0
+    # Если только один — это нормальное состояние
+    if [ "$(echo "$pids" | wc -w)" -gt 1 ]; then
+        # Несколько процессов — зомби, убиваем ВСЕХ. init затем поднимет один.
+        for pid in $pids; do
+            kill -9 "$pid" 2>/dev/null
+        done
+        sleep 1
+    fi
+}
+
+
+_t2s_put_route() {
+    [ -f /opt/etc/pivas.paused ] && return 0
+    /opt/etc/init.d/S95pivas-routes start
+}
+
+_ensure_t2s_route() {
+    [ -f /opt/etc/pivas.paused ] && return 0
+    /opt/etc/init.d/S95pivas-routes start
+}
+
+
+_vless_sync_dns_country() {
+    /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py apply
+}
+
+_vless_dns_probe() {
+#-------------------------------------------------------------------------------
+#   Один DNS-запрос к локальному резолверу. $1 - порт, $2 - домен.
+#   Успех = получен ответ NOERROR с хотя бы одной A-записью.
+#   dig (bind-dig) - зависимость пакета; если его нет - считаем, что проверить
+#   нечем и не мешаем работе (возврат 0).
+#-------------------------------------------------------------------------------
+    local port="$1" host="${2:-${DOMAIN_FOR_CHECK}}" out
+    command -v dig >/dev/null 2>&1 || return 0
+    out=$(dig +time=2 +tries=1 +short @127.0.0.1 -p "${port}" "${host}" A 2>/dev/null)
+    echo "${out}" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+}
+
+
+_vless_dns_selfcheck() {
+    [ -f /opt/etc/pivas.paused ] && return 0
+#-------------------------------------------------------------------------------
+#   Проверка DNS-цепочки после смены VLESS-ссылки.
+#
+#   ВАЖНО: смена outbound в xray НЕ должна трогать DNS. Весь DNS домашней сети
+#   жёстко заворачивается DNAT'ом в dnsmasq:9753 -> dnscrypt-proxy:9153, без
+#   запасного пути. Раньше здесь рестартовали dnsmasq и dnscrypt-proxy2, делали
+#   flush PIVAS_LIST и пересобирали маршруты - любая заминка при старте
+#   (dnscrypt-proxy без живых серверов, порт ещё занят, гонка с ndm-хуками)
+#   превращалась в полную потерю DNS у всех клиентов, которая сама не проходила.
+#
+#   Теперь ничего не перезапускаем. Только смотрим, отвечает ли локальный
+#   резолвер, и если служба лежит - поднимаем её командой start (не restart:
+#   живой процесс не трогаем). Постоянно за DNS следит сторожок в
+#   /opt/apps/pivas/bin/main/check_vpn (cron каждые 5 минут).
+#-------------------------------------------------------------------------------
+    local dns_port
+
+    if [ -x /opt/etc/init.d/S99adguardhome ] && ! [ -f /opt/etc/init.d/S56dnsmasq ]; then
+        ready "Проверяем DNS (AdGuard Home)"
+        if /opt/etc/init.d/S99adguardhome status 2>/dev/null | grep -q alive; then
+            when_ok "РАБОТАЕТ"
+        else
+            /opt/etc/init.d/S99adguardhome start >/dev/null 2>&1
+            sleep 2
+            /opt/etc/init.d/S99adguardhome status 2>/dev/null | grep -q alive \
+                && when_alert "ПОДНЯТ" || when_bad "ЛЕЖИТ"
+        fi
+        return 0
+    fi
+
+    [ -f /opt/etc/init.d/S56dnsmasq ] || return 0
+
+    dns_port=$(get_config_value DNSMASQ_PORT)
+    [ -n "${dns_port}" ] || dns_port=9753
+
+    ready "Проверяем DNS (dnsmasq:${dns_port})"
+    if _vless_dns_probe "${dns_port}"; then
+        when_ok "ОТВЕЧАЕТ"
+        return 0
+    fi
+
+    # Не отвечает: сначала поднимаем то, что лежит. start у rc.func идемпотентен
+    # ("already running"), поэтому живые процессы не пострадают.
+    if ! /opt/etc/init.d/S56dnsmasq status 2>/dev/null | grep -q alive; then
+        /opt/etc/init.d/S56dnsmasq start >/dev/null 2>&1
+    fi
+    if [ -x /opt/etc/init.d/S09dnscrypt-proxy2 ] && \
+       ! /opt/etc/init.d/S09dnscrypt-proxy2 status 2>/dev/null | grep -q alive; then
+        /opt/etc/init.d/S09dnscrypt-proxy2 start >/dev/null 2>&1
+    fi
+    sleep 3
+
+    if _vless_dns_probe "${dns_port}"; then
+        when_alert "ПОДНЯТ"
+        logger -t "ПИВАС" "vless set: локальный DNS не отвечал, службы подняты"
+        return 0
+    fi
+
+    when_bad "НЕ ОТВЕЧАЕТ"
+    logger -t "ПИВАС" "vless set: локальный DNS (127.0.0.1:${dns_port}) не отвечает"
+    warning "DNS домашней сети завёрнут в dnsmasq:${dns_port}. Проверьте: pivas status / pivas debug."
+    if [ -x /opt/etc/init.d/S09dnscrypt-proxy2 ] && ! _vless_dns_probe "$(get_config_value DNS_CRYPT_PORT)"; then
+        warning "dnscrypt-proxy2 не резолвит: нет живых DNSCrypt-серверов или закрыт исходящий DNS."
+    fi
+    return 1
+}
+
+
+_vless_sync_slot2_routing() {
+    /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py routing
+}
+
+
+_vless_restart_xray() {
+    _vless_sync_slot2_routing >/dev/null || return 1
+    [ -f /opt/etc/pivas.xray-stopped ] && return 0
+    "${XRAY_INIT}" restart
+}
+
+pivas_vless_set() {
+#-------------------------------------------------------------------------------
+#   Неинтерактивно применить vless-ссылку в выбранный слот.
+#   Использование:  pivas_vless_set <slot> <vless://...>
+#
+#   Фичи:
+#     * Per-slot бэкап — при set-1 сохраняется только slot-1 snapshot,
+#       rollback-1 восстановит именно его. Так же для slot-2.
+#     * Idempotent — если итоговый конфиг семантически идентичен текущему,
+#       xray не рестартим (не дёргаем бот/клиентов).
+#     * Зеркало — если другой слот не настроен, клонируем туда наш.
+#-------------------------------------------------------------------------------
+
+    local slot="$1"
+    local url="$2"
+    case "$slot" in 1|2) ;; *) error "Укажите слот 1 или 2"; return 1 ;; esac
+    if [ -z "$url" ]; then
+        echo "Использование: pivas vless set-${slot} <vless://...>"
+        return 1
+    fi
+    case "$url" in
+        vless://*|hysteria2://*|hy2://*) ;;
+        *) _vless_invalid "поддерживаются vless://, hysteria2:// и hy2://"; return 1 ;;
+    esac
+
+    mkdir -p "$PIVAS_BACKUP_PATH" 2>/dev/null
+
+    # Snapshot текущего состояния целевого слота — пригодится для rollback-N
+    local _slot_bak
+    case "$slot" in
+        1) _slot_bak="$VLESS_BACKUP_SLOT1" ;;
+        2) _slot_bak="$VLESS_BACKUP_SLOT2" ;;
+    esac
+
+    # Снапшот ВСЕГО конфига на случай фейла при обновлении (atomic rollback)
+    local _rollback_guard=""
+    if [ -f "$VLESS_CONFIG_FILE" ]; then
+        _rollback_guard="${VLESS_CONFIG_FILE}.pre-set-${slot}.$$"
+        cp "$VLESS_CONFIG_FILE" "$_rollback_guard"
+    fi
+
+    vless_link_parse "$url" "$VLESS_CONFIG_FILE" "$slot" || {
+        [ -n "$_rollback_guard" ] && [ -f "$_rollback_guard" ] && mv "$_rollback_guard" "$VLESS_CONFIG_FILE"
+        return 1
+    }
+
+    # Если другой слот ещё не задан — клонируем в него этот
+    # (vless_link_parse уже зеркалит; повтор идемпотентен).
+    _vless_ensure_placeholder_slots_mirrored "$VLESS_CONFIG_FILE"
+
+    _vless_sync_slot2_routing || { [ -n "$_rollback_guard" ] && mv "$_rollback_guard" "$VLESS_CONFIG_FILE"; return 1; }
+
+    # Валидация конфига xray
+    local check
+    check=$("${XRAY}" run -test -c "$VLESS_CONFIG_FILE" 2>&1)
+    if ! echo "$check" | grep -q "Configuration OK"; then
+        echo -e "${RED}Ошибки в конфигурации xray:${NOCL}"
+        echo "$check"
+        [ -n "$_rollback_guard" ] && [ -f "$_rollback_guard" ] && mv "$_rollback_guard" "$VLESS_CONFIG_FILE"
+        return 1
+    fi
+
+    # Idempotent: если итог байт-в-байт по jq -S идентичен rollback-guard'у,
+    # xray не рестартим — избегаем лишнего окна недоступности.
+    local identical=no
+    if [ -n "$_rollback_guard" ] && [ -f "$_rollback_guard" ]; then
+        if diff -q "$(jq -S . "$_rollback_guard" > "${_rollback_guard}.s"; echo "${_rollback_guard}.s")" \
+                    "$(jq -S . "$VLESS_CONFIG_FILE" > "${_rollback_guard}.n"; echo "${_rollback_guard}.n")" \
+                    >/dev/null 2>&1; then
+            identical=yes
+        fi
+        rm -f "${_rollback_guard}.s" "${_rollback_guard}.n"
+    fi
+
+    if [ "$identical" = "yes" ]; then
+        rm -f "$_rollback_guard"
+        echo "slot-${slot}: конфиг не изменился, xray не трогаем"
+        return 0
+    fi
+    if [ -n "$_rollback_guard" ] && [ -f "$_rollback_guard" ]; then
+        jq --arg tag "slot-${slot}" '{outbound: (.outbounds[] | select(.tag == $tag))}' "$_rollback_guard" > "$_slot_bak" || return 1
+        mv "$_rollback_guard" "$VLESS_CONFIG_FILE_BACKUP" || return 1
+    fi
+
+    ready "Перезапускаем xray (slot-${slot})"
+    _kill_xray_zombies
+    _rotate_xray_logs
+    if _vless_restart_xray >/dev/null 2>&1; then
+        _ensure_t2s_route
+        _vless_sync_dns_country || return 1
+        when_ok "УСПЕШНО"
+        # Смена outbound не требует ни рестарта DNS, ни flush ipset, ни
+        # пересборки маршрутов: IP из PIVAS_LIST по-прежнему уходят в t2s21 ->
+        # xray, а xray уже говорит с новым сервером. Только проверяем DNS.
+        _vless_dns_selfcheck || true
+    else
+        when_bad "ОШИБКА"
+        return 1
+    fi
+    return 0
+}
+
+
+pivas_vless_rollback_slot() {
+#-------------------------------------------------------------------------------
+#   Откат только указанного слота из per-slot snapshot (создаётся при set-N).
+#   Использование: pivas_vless_rollback_slot <slot>
+#-------------------------------------------------------------------------------
+    local slot="$1"
+    case "$slot" in 1|2) ;; *) error "Укажите слот 1 или 2"; return 1 ;; esac
+    local snap
+    snap=$(eval echo \$VLESS_BACKUP_SLOT${slot})
+    [ -f "$snap" ] || { error "Нет бэкапа для slot-${slot} ($snap)"; return 1; }
+
+    # snap содержит { "outbound": { tag:"slot-N", ... } }
+    local _tmp
+    _tmp=$(mktemp) || return 1
+    jq --slurpfile snap "$snap" --arg tag "slot-${slot}" '
+        .outbounds |= map(
+            if .tag == $tag then ($snap[0].outbound | .tag = $tag) else . end
+        )
+    ' "$VLESS_CONFIG_FILE" > "$_tmp" || { rm -f "$_tmp"; return 1; }
+    mv "$_tmp" "$VLESS_CONFIG_FILE"
+
+    ready "Откат slot-${slot}, перезапуск xray"
+    _kill_xray_zombies
+    _rotate_xray_logs
+    if _vless_restart_xray >/dev/null 2>&1; then
+        _ensure_t2s_route
+        _vless_sync_dns_country || return 1
+        when_ok "УСПЕШНО"
+    else
+        when_bad "ОШИБКА"
+        return 1
+    fi
+}
+
+
+_pivas_vless_show_slot() {
+    /opt/bin/python3 /opt/apps/pivas/bin/main/vless_url.py show "$VLESS_CONFIG_FILE" "$1"
+}
+
+
+pivas_vless_show() {
+#-------------------------------------------------------------------------------
+#   Показывает оба слота и списки доменов, привязанных к каждому.
+#-------------------------------------------------------------------------------
+
+    [ -f "$VLESS_CONFIG_FILE" ] || {
+        error "Конфиг $VLESS_CONFIG_FILE не найден. Выполните: pivas vless set-1 <url>"
+        return 1
+    }
+
+    _pivas_vless_show_slot 1
+    echo
+    _pivas_vless_show_slot 2
+    echo
+
+    # Slot-1: всё что в pivas.list, но не помечено на slot-2
+    local _all _slot2 _only1 n1 n2 n_only1
+    _all=$(mktemp); _slot2=$(mktemp); _only1=$(mktemp)
+    (grep -v '^#' "${PIVAS_LIST_FILE:-/opt/etc/pivas.list}" 2>/dev/null \
+        | grep -v '^[[:space:]]*$' | sort -u) > "$_all"
+    if [ -s "$VLESS_SLOT2_DOMAINS_FILE" ]; then
+        (grep -v '^#' "$VLESS_SLOT2_DOMAINS_FILE" | grep -v '^[[:space:]]*$' | sort -u) > "$_slot2"
+    else
+        : > "$_slot2"
+    fi
+    if [ -s "$_slot2" ] && [ -s "$_all" ]; then
+        grep -vFxf "$_slot2" "$_all" > "$_only1"
+    else
+        cp "$_all" "$_only1"
+    fi
+    n1=$(wc -l < "$_all")
+    n2=$(wc -l < "$_slot2")
+    n_only1=$(wc -l < "$_only1")
+
+    echo -e "${BLUE}Slot-1 домены (${n_only1}):${NOCL}"
+    if [ "$n_only1" -gt 0 ]; then
+        sed 's/^/  /' "$_only1"
+    else
+        echo "  (пусто)"
+    fi
+    echo
+
+    echo -e "${BLUE}Slot-2 домены (${n2}, помимо бота):${NOCL}"
+    if [ "$n2" -gt 0 ]; then
+        sed 's/^/  /' "$_slot2"
+    else
+        echo "  (пусто — только бот идёт через slot-2)"
+    fi
+    echo "  Всего в pivas-списке: ${n1}."
+
+    rm -f "$_all" "$_slot2" "$_only1"
+}
+
+
+pivas_vless_rollback() {
+#-------------------------------------------------------------------------------
+#   Восстанавливает pivas.json из последнего бэкапа (затрагивает оба слота
+#   и routing, так как бэкап целиком заменяет файл).
+#-------------------------------------------------------------------------------
+
+    [ -f "$VLESS_CONFIG_FILE_BACKUP" ] || {
+        error "Бэкап $VLESS_CONFIG_FILE_BACKUP не найден"
+        return 1
+    }
+    cp "$VLESS_CONFIG_FILE_BACKUP" "$VLESS_CONFIG_FILE" || return 1
+    ready "Откат конфига, перезапуск xray"
+    _kill_xray_zombies
+    _rotate_xray_logs
+    if _vless_restart_xray >/dev/null 2>&1; then
+        _ensure_t2s_route
+        _vless_sync_dns_country || return 1
+        when_ok "УСПЕШНО"
+    else
+        when_bad "ОШИБКА"
+        return 1
+    fi
+}
+
+
+_vless_pivas_list_append() {
+#-------------------------------------------------------------------------------
+#   Дописать домен/IP в pivas.list БЕЗ перезапуска dnsmasq (reset=no):
+#   вызывающий делает один cmd_pivas_refresh_lists на весь batch.
+#   Возвращает 0, если домен реально оказался в списке.
+#-------------------------------------------------------------------------------
+    local d="$1"
+    local KLIST="${PIVAS_LIST_FILE:-/opt/etc/pivas.list}"
+    # host_add напрямую: cmd_add_one_host может задать вопрос про теги
+    # (read_ynq) и без tty молча выйти, не добавив домен. Валидация и
+    # проверка дублей уже сделаны в pivas_vless_slot_add.
+    host_add "$d" no yes </dev/null >/dev/null 2>&1
+    grep -qxF "$d" "$KLIST" 2>/dev/null
+}
+
+
+_vless_pivas_list_remove() {
+#-------------------------------------------------------------------------------
+#   Убрать точную строку домена из pivas.list (и adguard-списка) без refresh.
+#-------------------------------------------------------------------------------
+    local d="$1" _tmp
+    local KLIST="${PIVAS_LIST_FILE:-/opt/etc/pivas.list}"
+    _tmp=$(mktemp) || return 1
+    grep -vxF "$d" "$KLIST" > "$_tmp"; cat "$_tmp" > "$KLIST"; rm -f "$_tmp"
+    if [ -n "${ADGUARD_IPSET_FILE:-}" ] && [ -f "${ADGUARD_IPSET_FILE}" ]; then
+        _tmp=$(mktemp) && { grep -vF "$d" "$ADGUARD_IPSET_FILE" > "$_tmp"; cat "$_tmp" > "$ADGUARD_IPSET_FILE"; rm -f "$_tmp"; }
+    fi
+    return 0
+}
+
+
+_vless_ipset_drop_domain() {
+#-------------------------------------------------------------------------------
+#   Убрать из ipset IP домена/подсети, который только что удалили из списка.
+#-------------------------------------------------------------------------------
+    local d="$1" ip
+    if printf '%s' "$d" | grep -qE -- "$(get_regexp_ip_or_range)"; then
+        /opt/sbin/ipset -exist del "${IPSET_TABLE_NAME}" "$d" 2>/dev/null
+        return 0
+    fi
+    for ip in $(dns__get_ips_by_domain "$d" 2>/dev/null); do
+        /opt/sbin/ipset -exist del "${IPSET_TABLE_NAME}" "$ip" 2>/dev/null
+    done
+    return 0
+}
+
+
+pivas_vless_slot_add() {
+#-------------------------------------------------------------------------------
+#   Привязка одного или НЕСКОЛЬКИХ доменов к слоту. Dedup + batch.
+#   Использование:  pivas_vless_slot_add <slot> <domain1> [domain2 ...]
+#
+#   - Если домен уже в целевом слоте → «уже в slot-X», не дёргаем pivas add.
+#   - Если домен в противоположном (slot-2) — просим сначала 2-del.
+#   - Для slot-2 routing-sync и xray-restart выполняются ОДИН раз в конце,
+#     а не после каждого домена (важно для batch-импорта списками).
+#-------------------------------------------------------------------------------
+    local slot="$1"; shift
+    case "$slot" in 1|2) ;; *) error "Укажите слот 1 или 2"; return 1 ;; esac
+    [ $# -eq 0 ] && { echo "Использование: pivas vless ${slot}-add <domain> [<domain2> ...]"; return 1; }
+
+    local KLIST="${PIVAS_LIST_FILE:-/opt/etc/pivas.list}"
+    local S2FILE="$VLESS_SLOT2_DOMAINS_FILE"
+    mkdir -p "$(dirname "$S2FILE")" 2>/dev/null
+    touch "$S2FILE"
+    _vless_slot2_compact "$S2FILE"
+
+    local any_slot2_change=0
+    local n_ok=0 n_dup=0 n_move=0 n_fail=0
+    local raw domain in_main in_s2
+    # Домены, реально дописанные в pivas.list: dnsmasq/ipset обновляем ОДИН раз
+    # в конце (а не 3 с на каждый домен), прогрев DNS — в фоне.
+    local added_list=""
+
+    for raw in "$@"; do
+        # Нормализация: CIDR/IP сохраняем как есть; у домена убираем схему, путь, www., пробелы.
+        if printf '%s' "$raw" | grep -Eq '^[[:space:]]*[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?[[:space:]]*$'; then
+            domain=$(printf '%s' "$raw" | sed 's|[[:space:]]||g')
+        else
+            domain=$(printf '%s' "$raw" | sed 's|^https\?://||; s|/.*$||; s|[[:space:]]||g; s|^www\.||')
+        fi
+        case "$domain" in
+            '') continue ;;
+            *.*) ;;
+            *)   echo "  $raw: не похоже на домен, пропуск"; n_fail=$((n_fail+1)); continue ;;
+        esac
+        # Домены в списках всегда в нижнем регистре — иначе ip-api.com и
+        # IP-API.com считаются разными и UI даёт добавить дважды.
+        domain=$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')
+
+        in_main=no; in_s2=no
+        grep -qxFi "$domain" "$KLIST"  2>/dev/null && in_main=yes
+        grep -qxFi "$domain" "$S2FILE" 2>/dev/null && in_s2=yes
+
+        if [ "$slot" = "1" ]; then
+            if [ "$in_s2" = yes ]; then
+                # Перемещаем: убираем из slot-2 override (domain остаётся в pivas-списке → пойдёт через slot-1)
+                local _tmp
+                _tmp=$(mktemp); grep -vxF "$domain" "$S2FILE" > "$_tmp"; mv "$_tmp" "$S2FILE"  # grep -v на последнем домене даёт rc=1 — mv без &&
+                echo "  $domain: перенесён из slot-2 в slot-1"
+                n_move=$((n_move+1))
+                any_slot2_change=1
+                continue
+            fi
+            if [ "$in_main" = yes ]; then
+                echo "  $domain: уже в slot-1"
+                n_dup=$((n_dup+1)); continue
+            fi
+            if _vless_pivas_list_append "$domain"; then
+                echo "  $domain: добавлен в slot-1"
+                n_ok=$((n_ok+1)); added_list="${added_list} ${domain}"
+            else
+                echo "  $domain: НЕ добавлен (проверьте dnsmasq/pivas setup)"
+                n_fail=$((n_fail+1))
+            fi
+            continue
+        fi
+
+        # slot=2
+        if [ "$in_s2" = yes ]; then
+            echo "  $domain: уже в slot-2"
+            n_dup=$((n_dup+1)); continue
+        fi
+        if [ "$in_main" = no ]; then
+            if ! _vless_pivas_list_append "$domain"; then
+                echo "  $domain: НЕ удалось добавить в pivas-список"
+                n_fail=$((n_fail+1)); continue
+            fi
+            echo "  $domain: добавлен в slot-2"
+            n_ok=$((n_ok+1)); added_list="${added_list} ${domain}"
+        else
+            echo "  $domain: перенесён из slot-1 в slot-2"
+            n_move=$((n_move+1))
+        fi
+        echo "$domain" >> "$S2FILE"
+        any_slot2_change=1
+    done
+
+    _vless_slot2_compact
+    [ "$n_fail" -eq 0 ] || return 1
+
+    if [ -n "$added_list" ]; then
+        # один общий refresh: dnsmasq (ipset=/…/ таблица), IP из списка, servers-file, маршрут
+        cmd_pivas_refresh_lists || return 1
+        # прогрев DNS добавленных доменов — в фоне, чтобы не держать бота/веб
+        ( unset PIVAS_LOCK_TOKEN PIVAS_LOCK_ENTRY; sleep 2; for _d in $added_list; do ipset__fill_by_domain "$_d"; done ) >/dev/null 2>&1 &
+    fi
+
+    if [ "$any_slot2_change" = "1" ]; then
+        /opt/apps/pivas/bin/main/dnscrypt_pin dnsmasq || return 1
+    fi
+    # pivas add внутри 1-add/2-add зовёт cmd_pivas_init и может снести
+    # table 1001. Всегда возвращаем маршрут, даже если xray не трогали.
+    _ensure_t2s_route
+
+    echo
+    echo "Итого: добавлено=$n_ok, уже_было=$n_dup, перенесено_в_slot2=$n_move, ошибок=$n_fail"
+    [ "$n_fail" -eq 0 ]
+}
+
+
+pivas_vless_slot_del() {
+#-------------------------------------------------------------------------------
+#   Удаление одного/нескольких доменов. Симметрично для slot-1 и slot-2:
+#   домен УБИРАЕТСЯ ИЗ VPN ПОЛНОСТЬЮ (состояние «нигде» — идёт напрямую).
+#
+#   Если домен был в slot-2 — чистим и slot-2-override, и основной pivas-список.
+#   Если домен был в slot-1 — чистим только основной (в slot-2 его не было).
+#
+#   Аргумент slot сейчас не меняет поведение, но оставлен для симметрии CLI
+#   и для возможности warn'а если пользователь ошибся слотом.
+#-------------------------------------------------------------------------------
+    local slot="$1"; shift
+    case "$slot" in 1|2) ;; *) error "Укажите слот 1 или 2"; return 1 ;; esac
+    [ $# -eq 0 ] && { echo "Использование: pivas vless ${slot}-del <domain> [<domain2> ...]"; return 1; }
+
+    local KLIST="${PIVAS_LIST_FILE:-/opt/etc/pivas.list}"
+    local S2FILE="$VLESS_SLOT2_DOMAINS_FILE"
+    local n_ok=0 n_miss=0 any_slot2_change=0
+    local raw domain in_main in_s2
+    local removed_list=""
+
+    for raw in "$@"; do
+        if printf '%s' "$raw" | grep -Eq '^[[:space:]]*[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?[[:space:]]*$'; then
+            domain=$(printf '%s' "$raw" | sed 's|[[:space:]]||g')
+        else
+            domain=$(printf '%s' "$raw" | sed 's|^https\?://||; s|/.*$||; s|[[:space:]]||g; s|^www\.||' | tr '[:upper:]' '[:lower:]')
+        fi
+        [ -z "$domain" ] && continue
+
+        in_main=no; in_s2=no
+        grep -qxF "$domain" "$KLIST"  2>/dev/null && in_main=yes
+        grep -qxF "$domain" "$S2FILE" 2>/dev/null && in_s2=yes
+
+        if [ "$in_main" = "no" ] && [ "$in_s2" = "no" ]; then
+            echo "  $domain: не было в списках"
+            n_miss=$((n_miss+1))
+            continue
+        fi
+
+        # Если был в slot-2 — сначала snapshot slot-2 override
+        if [ "$in_s2" = "yes" ]; then
+            local _tmp
+            _tmp=$(mktemp); grep -vxF "$domain" "$S2FILE" > "$_tmp"; mv "$_tmp" "$S2FILE"  # grep -v на последнем домене даёт rc=1 — mv без &&
+            any_slot2_change=1
+        fi
+
+        # Теперь вычищаем из основного pivas-списка (без refresh — он один в конце)
+        if [ "$in_main" = "yes" ]; then
+            _vless_pivas_list_remove "$domain"
+            removed_list="${removed_list} ${domain}"
+        fi
+
+        # Для понятности сообщения — какой из слотов это был
+        if [ "$in_s2" = "yes" ]; then
+            echo "  $domain: удалён (был в slot-2)"
+        else
+            echo "  $domain: удалён (был в slot-1)"
+        fi
+        n_ok=$((n_ok+1))
+    done
+
+    if [ -n "$removed_list" ]; then
+        # один общий refresh dnsmasq/ipset/servers-file на весь batch
+        cmd_pivas_refresh_lists || return 1
+        # IP удалённых доменов вычищаем из ipset в фоне (dig на каждый — медленно)
+        ( unset PIVAS_LOCK_TOKEN PIVAS_LOCK_ENTRY; for _d in $removed_list; do _vless_ipset_drop_domain "$_d"; done ) >/dev/null 2>&1 &
+    fi
+
+    # Если тронули slot-2 override — compact, sync routing и restart xray один раз
+    _vless_slot2_compact "$S2FILE"
+    if [ "$any_slot2_change" = "1" ]; then
+        /opt/apps/pivas/bin/main/dnscrypt_pin dnsmasq || return 1
+    fi
+    # pivas del → cmd_pivas_init может снести table 1001
+    _ensure_t2s_route
+
+    echo
+    echo "Итого: удалено=$n_ok, не_было=$n_miss"
+}
+
+
+pivas_vless_slot_list() {
+#-------------------------------------------------------------------------------
+#   Показывает список доменов, эффективно привязанных к слоту.
+#   slot=1: основной pivas-список МИНУС overrides из slot-2.
+#   slot=2: содержимое slot-2 override-файла.
+#-------------------------------------------------------------------------------
+    local slot="$1"
+    case "$slot" in 1|2) ;; *) error "Укажите слот 1 или 2"; return 1 ;; esac
+    if [ "$slot" = "1" ]; then
+        echo -e "${GREEN}Slot-1 домены (трафик идёт через slot-1):${NOCL}"
+        local _all _slot2 _tmp
+        _all=$(mktemp) || return 1
+        _slot2=$(mktemp) || { rm -f "$_all"; return 1; }
+        # Чистый pivas-список (без цветных кодов/пустых строк); как есть
+        pivas show 2>/dev/null \
+            | sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g' \
+            | grep -vE '^[[:space:]]*$|^-+$|Итого|защищ' \
+            | awk '{ print $1 }' \
+            | sort -u > "$_all"
+        if [ -s "$VLESS_SLOT2_DOMAINS_FILE" ]; then
+            grep -v '^#' "$VLESS_SLOT2_DOMAINS_FILE" \
+                | grep -vE '^[[:space:]]*$' | sort -u > "$_slot2"
+        else
+            : > "$_slot2"
+        fi
+        # Разность: в _all, но не в _slot2
+        if [ -s "$_all" ]; then
+            if [ -s "$_slot2" ]; then
+                grep -vFxf "$_slot2" "$_all" | sed 's/^/  /'
+            else
+                sed 's/^/  /' "$_all"
+            fi
+            echo
+            local n1 n2
+            n1=$(wc -l < "$_all")
+            n2=$(wc -l < "$_slot2")
+            echo "  (всего в pivas-списке: $n1, из них через slot-2: $n2)"
+        else
+            echo "  (pivas-список пуст)"
+        fi
+        rm -f "$_all" "$_slot2"
+        return 0
+    fi
+    echo -e "${GREEN}Slot-2 домены:${NOCL}"
+    if [ -s "$VLESS_SLOT2_DOMAINS_FILE" ]; then
+        grep -v '^#' "$VLESS_SLOT2_DOMAINS_FILE" | grep -v '^[[:space:]]*$' \
+            | tr '[:upper:]' '[:lower:]' | sort -u | sed 's/^/  /'
+    else
+        echo "  (пусто — только трафик бота идёт через slot-2)"
+    fi
+}
+
+_vless_slot2_compact() {
+#-------------------------------------------------------------------------------
+#   Убрать дубли и пустые строки из pivas-slot2.list (нижний регистр).
+#-------------------------------------------------------------------------------
+    local f="${1:-$VLESS_SLOT2_DOMAINS_FILE}"
+    [ -f "$f" ] || return 0
+    local tmp
+    tmp=$(mktemp) || return 1
+    grep -v '^#' "$f" 2>/dev/null | grep -v '^[[:space:]]*$' \
+        | sed 's/[[:space:]]//g' | tr '[:upper:]' '[:lower:]' | sort -u > "$tmp"
+    mv "$tmp" "$f"
+    if [ -x /opt/apps/pivas/bin/main/dnscrypt_pin ]; then
+        /opt/apps/pivas/bin/main/dnscrypt_pin dnsmasq >/dev/null 2>&1 || true
+    fi
+}
+
+
+
+set_cursor_to_line_above() {
+#-------------------------------------------------------------------------------
+#
+#	Функция устанавливает курсор на одну строку вверх на первую позицию
+#   и стираем содержимое строки выше
+#
+#-------------------------------------------------------------------------------
+    echo -en "\033[1A\033[2K"
+}
+
+
+
+delete_proxy_interface() {
+#-------------------------------------------------------------------------------
+#
+#	Функция удаляет Proxy интерфейс
+#
+#-------------------------------------------------------------------------------
+    # Удаляем конфигурацию профиля Proxy перед установкой такой же конфигурации
+    api_post_query  '[{"interface": { "name": "'${PROXY_VLESS_NAME}'","no": true },"system": {"configuration": {"save": true}}}]' &> /dev/null
+}
+
+
+cmd_install_proxy_package() {
+#-------------------------------------------------------------------------------
+#
+#	Функция устанавливает пакет Proxy
+#
+#-------------------------------------------------------------------------------
+    if ! has_package_installed 'Proxy client' ; then
+
+        # Создаем запись в файле /opt/etc/profile для продолжения установки Proxy клиента
+        # DEBUG - восстановить после отладки
+        echo "pivas vless" >> /opt/etc/profile
+        # echo "/opt/root/vless.dev" >> /opt/etc/profile
+
+        #  Ставим пакет proxy в очередь на установку
+        system_packages_action install proxy opkg-kmod-netfilter opkg-kmod-netfilter-addons && create_proxy_interface || return 1
+
+    else
+
+        # продолжение установки Proxy клиента
+
+        create_proxy_interface
+        
+
+        return 0
+    fi
+set +xeu
+}
+
+
+create_proxy_interface(){
+#-------------------------------------------------------------------------------
+#
+#   Функция для создания интерфейса для Proxy клиента и задает ему его свойства по умолчанию
+#
+#-------------------------------------------------------------------------------
+
+    delete_proxy_interface
+
+    data='[{
+        "interface": {
+            "name": "'${PROXY_VLESS_NAME}'",
+            "description": "'${PROXY_VLESS_DESC}'",
+            "proxy": {
+                "protocol": {
+                    "proto": "'${PROXY_VLESS_PROTO}'"
+                },
+                "upstream": {
+                    "host": "'${PROXY_LOCAL_IP}'",
+                    "port": "'${PROXY_VLESS_PORT}'"
+                },
+                "socks5-udp": true
+            }
+        },
+        "system": {
+            "configuration": {
+                "save": true
+            }
+        }
+    }]'
+
+    # создаем интерфейс для Proxy клиента и задает ему его свойства по умолчанию
+    api_post_query "${data}" "" &> /dev/null
+
+    # удаляем запись в файле /opt/etc/profile, чтобы прекратить повторную установку Proxy клиента
+    # DEBUG - восстановить после отладки
+    sed -i '/pivas vless/d' /opt/etc/profile
+    # sed -i '/\/opt\/root\/vless.dev/d' /opt/etc/profile
+
+}
+
+has_xray_installed(){
+#-------------------------------------------------------------------------------
+#
+#	Функция проверяет установлен ли пакет xray
+#
+#-------------------------------------------------------------------------------
+	# ! opkg files xray | grep -q 'xray not installed'
+    [ -f "${XRAY}" ]
+}
+
+
+
+proxy_package_progress(){
+#-------------------------------------------------------------------------------
+#
+#	Функция отображает прогресс установки системного пакета
+#
+#-------------------------------------------------------------------------------
+    local action="$1"
+    local sys_text="системных пакетов"
+
+# set -xeu
+    local act_text="Установка"; done_txt="а"
+    [ "${action}" = "remove" ] && {
+        act_text="Удаление"; done_txt="о"
+    }
+
+    # Ожидаем завершения установки Proxy клиента
+    local progress=0
+    
+    ready "${GREEN}${act_text} ${sys_text}${NOCL}" && when_alert "ЗАПУСКАЕМ"
+
+    until status=$(api_get_query "show/components/status") && ! echo "${status}" | grep -q pending ; do sleep 3; done
+    set_cursor_to_line_above
+
+    # цикл выполняется до 100%
+    while progress=$(api_get_query "show/components/status" | jq -r '.update["progress"]' ) && [ "${progress}" != "null" ]; do
+
+        # на предыдущей позиции выводим прогресс выполнения установки пакета
+        ready "${BLUE}${act_text} ${sys_text}${NOCL}" && when_alert "${progress}%"
+
+        # Ждем 1 секунду
+        sleep 1
+
+        # Переводим курсор на одну строку вверх на первую позицию и стираем содержимое строки выше
+        set_cursor_to_line_above
+
+    done
+    # set_cursor_to_line_above
+    ready "${GREEN}${act_text} ${sys_text} завершен${done_txt}${NOCL}" && when_ok "УСПЕШНО"
+    print_line
+    echo -e "${RED}Сейчас устройство будет перезагружено...${NOCL}"
+    
+set +xeu
+
+}
+
+system_packages_action(){
+#-------------------------------------------------------------------------------
+#
+#	Функция производит действия с системным пакетом
+#
+#-------------------------------------------------------------------------------
+
+    local action="$1"; shift
+    local packages="$@"
+
+    local act_text="установлен"
+    [ "${action}" = "remove" ] && act_text="удален"
+
+    # local data='[
+    #     {
+    #         "components": {
+    #             "'${action}'": {
+    #                 "component": "'${package_name}'"
+    #             },
+    #             "commit": true
+    #         }
+    #     }
+    # ]'
+# set -xeu
+    # Проверяем интернет подключение
+    has_no_internet_here && {
+        error "Интернет не доступен. Проверьте свое интернет продключение. "
+        exit 1
+    }
+# set -xeu
+    local printline=false
+    local acted=false
+    local _list_to_act=""
+    # Проверяем, что пакеты установлены
+    for package in ${packages}; do
+        if [ "${action}" = "remove" ] ; then
+            has_package_uninstalled "${package}" && acted=true
+        else
+            has_package_installed "${package}" && acted=true
+        fi
+        if [ "${acted}" = true ] ; then
+            warning "Пакет ${package} уже ${act_text}."
+            printline=true
+            acted=false
+        else
+            _list_to_act="${_list_to_act} ${package}"
+        fi
+    done
+
+    [ "${printline}" = "true" ] && print_line
+
+    # если не все пакеты обработаны (установлены ли удалены)
+    if [ -n "${_list_to_act}" ]; then
+set +xeu
+        # Заправшиваем список установленных пакетов
+        until status=$( api_post_query "{}" "components/list" ) && ! echo "${status}" | grep -q continued; do sleep 3; done
+# set -xeu
+        for package in ${_list_to_act}; do
+            local data='[{"components": {"'${action}'": {"component": "'${package// /}'"}}}]'
+            out=$(api_post_query "${data}")
+            echo "${out}" | grep -q " is unavailable" && {
+                data='[{"components": {"'${action}'": {"component": "'${package// /}'"}}}]'
+                out=$(api_post_query "${data}")
+                echo "${out}" | grep -q " is unavailable" && {
+                    error "Пакет ${package} не доступен. Проверьте правильность написания пакета."
+                    return 1
+                }
+            }
+        done
+
+        # Подтверждаем установку или удаление пакетов
+        api_post_query '[{"components": {"commit": true}}]' &> /dev/null
+
+        # Отрисовываем индикатор процесса установки пакетов
+        # и ожидаем его завершения
+        proxy_package_progress "${action}"
+        return 1
+    else 
+        return 0
+    fi
+
+set +xeu
+}
+
+
+test_vless_proxy() {
+#-------------------------------------------------------------------------------
+#
+#	Функция проверяет работу Proxy Vless на доступность доменного имени
+#
+#-------------------------------------------------------------------------------
+    local _inface=${1}
+    # iface=$(ip a | grep global | grep t2s_br${PROXY_INFACE_NUMEBER} | sed 's/.*\(t2s_br'${PROXY_INFACE_NUMEBER}'\)/\1/g')
+    ready "Проверка соединения \"${PROXY_VLESS_DESC}\" к ${DOMAIN_FOR_CHECK}"
+    local _out=$(curl -s --interface ${_inface} ${DOMAIN_FOR_CHECK} 2>&1)
+    if echo "${_out}" | tail -n 1 | grep -qE "${IP_FILTER}" ; then
+        when_ok "УСПЕШНО"
+    else
+        when_bad "ОШИБКА"
+        [ -n "${_out}" ] && {
+            print_line
+            echo "${_out}" && echo
+        }
+        
+    fi
+}
+
+_cmd_install_vless_proxy(){
+#-------------------------------------------------------------------------------
+#
+#	Системная функция, которая запускает установку Proxy Vless
+#
+#-------------------------------------------------------------------------------
+
+    cmd_install_proxy_package
+
+    vless_ln=''
+    has_xray_installed || opkg install xray &> /dev/null
+    #read_value "Введите vless ссылку: " vless_ln string
+
+    # DEBUG - восстановить после отладки
+    # cp "${VLESS_CONFIG_ORIGINAL_FILE}" "${VLESS_CONFIG_FILE}"
+    cp ~/pivas.vless "${VLESS_CONFIG_FILE}"
+
+    . /opt/apps/pivas/.env
+    vless_ln="${VLESS_LINK}"
+
+    vless_link_parse "${vless_ln}" "${VLESS_CONFIG_FILE}"
+    #cat "${VLESS_CONFIG_FILE}"
+
+    # Проверка конфигурации xray
+    check_xray_config=$(${XRAY} run -test -c ${VLESS_CONFIG_FILE})
+
+    if echo "${check_xray_config}" | grep -q "Configuration OK." ; then
+        # Запуск xray в случае, если конфигурация xray не содержит ошибок
+        ${XRAY_INIT} restart && pivas vpn set
+    else
+        # В случае если есть ошибки выводим их в консоль
+        echo -e "${BLUE}В файле ${VLESS_CONFIG_FILE} обнаружены следующие ошибки:${NOCL}"
+        print_line
+        echo -e "${RED}${check_xray_config}${NOCL}"
+    fi
+
+
+}
+
+_cmd_remove_vless_proxy(){
+#-------------------------------------------------------------------------------
+#
+#	Функция удаляет Proxy Vless пакеты и конфигурацию,
+#   чтоб привести Пивас к базовому состоянию для отладки пакета
+#
+#-------------------------------------------------------------------------------
+    # Удаляем пакет xray
+    has_package_installed 'Proxy client' && {
+
+        # Останавливаем службу xray
+        ${XRAY_INIT} stop &> /dev/null
+
+        # Удаляем пакет xray
+        opkg remove xray &> /dev/null
+
+        # Удаляем конфигурациюs
+        rm -f "${VLESS_CONFIG_FILE}"
+
+        # Удаляем конфигурацию профиля Proxy
+        delete_proxy_interface
+
+        #  Ставим пакет proxy в очередь на удаление
+        system_packages_action remove proxy
+
+    }
+
+}
+
+
+#system_packages_action remove proxy opkg-kmod-netfilter opkg-kmod-netfilter-addons
+# system_packages_action install proxy opkg-kmod-netfilter opkg-kmod-netfilter-addons
+# cmd_install_vless_proxy
+# ifs=$(ip a | grep global | grep t2s_ | sed 's/.*\(t2s_.*\)/\1/g')
+# curl -v -i ${ifs} ifconfig.me && echo

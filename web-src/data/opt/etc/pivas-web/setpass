@@ -1,0 +1,58 @@
+#!/bin/sh
+# Установить / сменить пароль для pivas-web.
+# Логин всегда admin.
+# Пароль хэшируется PBKDF2-SHA256 (100 000 итераций, 16-байт salt)
+# и пишется в /opt/etc/pivas-web/auth как
+#   admin:pbkdf2_sha256$100000$<salt_b64>$<hash_b64>
+#
+# При смене пароля ротируется /opt/etc/pivas-web/secret — все старые
+# cookie-сессии инвалидируются.
+
+AUTH=/opt/etc/pivas-web/auth
+SECRET=/opt/etc/pivas-web/secret
+USER=admin
+PY=/opt/bin/python3
+
+if [ -z "$1" ]; then
+    echo "Использование: $0 <пароль>"
+    echo "Логин всегда: $USER"
+    exit 1
+fi
+
+if [ ${#1} -lt 4 ]; then
+    echo "Пароль слишком короткий (минимум 4 символа)."
+    exit 1
+fi
+
+if [ ! -x "$PY" ]; then
+    echo "Python3 не найден ($PY). Установите: opkg install python3-base python3-light"
+    exit 1
+fi
+
+HASH=$("$PY" - "$1" <<'PY'
+import sys, os, hashlib, base64
+pwd = sys.argv[1]
+salt = os.urandom(16)
+dk = hashlib.pbkdf2_hmac("sha256", pwd.encode("utf-8"), salt, 100000)
+print(
+    "pbkdf2_sha256$100000$"
+    + base64.b64encode(salt).decode()
+    + "$" + base64.b64encode(dk).decode()
+)
+PY
+) || { echo "Ошибка хэширования."; exit 1; }
+
+umask 0077
+printf '%s:%s\n' "$USER" "$HASH" > "$AUTH"
+chmod 600 "$AUTH"
+
+# M4: при смене пароля инвалидируем все текущие cookie-сессии.
+rm -f "$SECRET"
+
+echo "Пароль для $USER сохранён (PBKDF2-SHA256, 100k итераций)."
+echo "Все текущие веб-сессии будут сброшены."
+if [ -f /opt/etc/pivas-web/enabled ]; then
+    echo "Применить к работающему вебу: pivas web restart"
+else
+    echo "Веб остаётся выключенным. Включить: pivas web on"
+fi

@@ -1,0 +1,4 @@
+#!/bin/sh
+# ПАКЕТ ПИВАС: сторожок DNS, каждую минуту. Логика - в /opt/apps/pivas/bin/main/check_dns.
+[ -x /opt/apps/pivas/bin/main/check_dns ] && exec /opt/apps/pivas/bin/main/check_dns
+exit 0

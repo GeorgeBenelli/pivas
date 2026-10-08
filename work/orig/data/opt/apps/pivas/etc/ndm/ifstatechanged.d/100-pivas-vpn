@@ -1,0 +1,52 @@
+#!/bin/sh
+
+# All state writers share one lock; nested calls retain its owner token.
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py try-locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+
+
+. /opt/apps/pivas/bin/libs/ndm_d
+
+if [ "${1}" = "hook" ] && [ "${change}" = "link" ] ; then
+
+#	 Действия для подключений PPTP|L2TP, которое подключено к провайдеру
+	 if [[ ${id} =~ 'PPTP|L2TP' ]] && is_cli_iface_global "${id}"; then
+		#	В случае отключения PPTP|L2TP соединения через основной интерфейс
+		#	проще говоря, в случае если подключение к интернету осуществляется
+		#	через PPTP|L2TP соединение и оно прервалось	- ставим флаг, в виде создания файла
+		tmp_file=/opt/tmp/sub_connection
+		
+		case "${connected}-${link}-${up}" in
+			"no-down-down" )
+				touch "${tmp_file}"
+			;;
+			"yes-up-up" )
+				[ -f "${tmp_file}" ] && {
+					# После отключения PPTP|L2TP (которое используется для подключения к провайдеру)
+					# и при наличии файла tmp_file - переустанавливаем ipset правила для восстановления
+					cmd_vpn_iptable_reset &> /dev/null
+					logger -t "ПИВАС"  "Соединение ${id} успешно подключено, правила восстановлены!"
+					rm -f "${tmp_file}"
+				}
+			;;
+		esac
+	fi
+
+#	Действия для всех остальных подключений
+	if [ "${id}" = "$(inface_cli)" ]; then
+		case "${connected}-${link}-${up}" in
+			"no-down-down" )
+				cmd_vpn_iptable_reset &> /dev/null
+#				в качестые экперимента
+#				link_down &> /dev/null
+				logger -t "ПИВАС"  "Соединение ${id} прервано. Правила и таблицы очищены."
+			;;
+			"yes-up-up" )
+				link_reboot &> /dev/null
+				logger -t "ПИВАС"  "Соединение ${id} установлено. Правила и таблицы пересозданы."
+			;;
+		esac
+	fi
+fi

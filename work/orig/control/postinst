@@ -1,0 +1,88 @@
+
+#!/bin/sh
+
+BLUE="\033[36m";
+NOCL="\033[m";
+
+print_line()(printf "%83s\n" | tr " " "=")
+
+chmod -R +x /opt/apps/pivas/bin/*
+# chmod -R +x /opt/apps/pivas/sbin/dnsmasq/*
+chmod -R +x /opt/apps/pivas/etc/init.d/*
+chmod -R +x /opt/apps/pivas/etc/ndm/*
+# сторожок DNS (cron каждую минуту) — должен быть исполняемым для run-parts;
+# старую 5-минутную копию убираем, иначе будут два сторожка
+rm -f /opt/etc/cron.5mins/pivas-dns-watchdog
+[ -f /opt/etc/cron.1min/pivas-dns-watchdog ] && chmod +x /opt/etc/cron.1min/pivas-dns-watchdog
+[ -f /opt/etc/init.d/S10dnscrypt-slot2 ] && chmod +x /opt/etc/init.d/S10dnscrypt-slot2
+
+ln -sf /opt/apps/pivas/bin/pivas /opt/bin/pivas
+
+# opkg records can outlive init scripts renamed by legacy setup/removal.
+# Repair from local templates; never recurse into opkg from postinst.
+/opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py dns-services || exit 1
+
+# CRITICAL: upstream делал `cp -f pivas.conf`, что ЗАТИРАЛО рабочий
+# конфиг (INFACE_CLI=Proxy21, SETUP_FINISHED=yes, VLESS_SLOT_* и т.п.).
+# В нашем форке конфиг копируем ТОЛЬКО если его нет (первая установка),
+# иначе мержим недостающие ключи из шаблона.
+if [ ! -f /opt/etc/pivas.conf ]; then
+    cp -f /opt/apps/pivas/etc/conf/pivas.conf /opt/etc/pivas.conf
+else
+    # мерж: добавить в существующий только НОВЫЕ ключи шаблона, не
+    # трогая имеющиеся значения (INFACE_*, SETUP_FINISHED и т.п.)
+    while IFS='=' read -r key _; do
+        case "$key" in ''|\#*) continue ;; esac
+        grep -qE "^${key}=" /opt/etc/pivas.conf || \
+            grep -E "^${key}=" /opt/apps/pivas/etc/conf/pivas.conf >> /opt/etc/pivas.conf
+    done < /opt/apps/pivas/etc/conf/pivas.conf
+fi
+[ -f /opt/etc/pivas.list ] || cp -f /opt/apps/pivas/etc/conf/pivas.list /opt/etc/pivas.list
+mkdir -p /opt/etc/adblock /opt/etc/dnsmasq.d
+# A clean reinstall can retain an old dnsmasq.conf that names this file while
+# the generated file itself was removed. Keep the inactive resolver valid.
+if [ -f /opt/etc/dnsmasq.conf ] && \
+   grep -qx 'servers-file=/opt/etc/dnsmasq.d/pivas.servers' /opt/etc/dnsmasq.conf && \
+   [ ! -f /opt/etc/dnsmasq.d/pivas.servers ]; then
+    printf 'server=127.0.0.1#53\n' > /opt/etc/dnsmasq.d/pivas.servers
+    chmod 644 /opt/etc/dnsmasq.d/pivas.servers
+fi
+# Эти тоже условно — если пользователь кастомизировал, не затираем.
+[ -f /opt/etc/adblock/sources.list ] || \
+    cp -f /opt/apps/pivas/etc/conf/adblock.sources /opt/etc/adblock/sources.list
+cp -f /opt/apps/pivas/etc/ndm/ndm /opt/apps/pivas/bin/libs/ndm
+
+sed -i "s/\(APP_VERSION=\).*/\11.1.9_beta-10/; s/^,//; s/\,/ /g;" "/opt/etc/pivas.conf"
+sed -i "s/\(APP_RELEASE=\).*/\125-custom25/; s/^,//; s/\,/ /g;" "/opt/etc/pivas.conf"
+
+# Keep installation/upgrade inactive until the explicit `pivas start`.
+mkdir -p /opt/tmp /opt/etc/.pivas/backup
+touch /opt/etc/pivas.paused
+# Validate before writing, preserve a private pre-upgrade snapshot. Saved
+# slot/full rollback snapshots are converted when they are applied later.
+/opt/bin/python3 /opt/apps/pivas/bin/main/vless_url.py migrate /opt/etc/xray/pivas.json || exit 1
+# On a fresh install there is no VLESS configuration; keep Xray off at boot.
+# An explicit `pivas start` clears this flag after the owner configures a slot.
+[ -f /opt/etc/xray/pivas.json ] || touch /opt/etc/pivas.xray-stopped
+/opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py detach >/dev/null 2>&1 || true
+/opt/etc/init.d/S56dnsmasq stop >/dev/null 2>&1 || true
+rm -f /opt/tmp/pivas-web-state.json
+for tree in netfilter.d ifstatechanged.d iflayerchanged.d fs.d; do
+    if [ -d "/opt/apps/pivas/etc/ndm/$tree" ]; then
+        mkdir -p "/opt/etc/ndm/$tree"
+        cp -f /opt/apps/pivas/etc/ndm/"$tree"/* "/opt/etc/ndm/$tree/"
+    fi
+done
+/opt/etc/init.d/S95pivas-routes stop >/dev/null 2>&1 || true
+( . /opt/apps/pivas/bin/libs/ndm; ip4__chain__delete_jump nat PIVAS_DNS ) >/dev/null 2>&1 || true
+/opt/etc/init.d/S10dnscrypt-slot2 stop >/dev/null 2>&1 || true
+# A previous stdout log can be huge; it is no longer used by custom2.
+oldlog=/opt/etc/telegram4pivas/telegram4pivas_stdout.log
+if [ -f "$oldlog" ]; then
+    tail -c 262144 "$oldlog" > "$oldlog.1" 2>/dev/null
+    : > "$oldlog"
+fi
+
+print_line
+echo "Pivas установлен. После настройки слотов выполните: pivas start"
+print_line

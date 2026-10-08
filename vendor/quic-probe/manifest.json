@@ -1,0 +1,14 @@
+{
+  "compiler": "go version go1.26.6 darwin/arm64",
+  "source_sha256": {
+    "go.mod": "887674cb005981b8178688b283681896e1a10083562c573148b788d6f9b2db91",
+    "go.sum": "3c6167e28a1cf1e15649654997be60278567639a275e98e62183702e0bc6193c",
+    "main.go": "e7141ec378ac32cc14fb241ce19ee5806ee01444ea0c4746748a51b9f7badb91",
+    "main_test.go": "013af6acf61d7ccb146ff07445d505ddc541e919c287fac4525cb2492ccf8f1e"
+  },
+  "sha256": {
+    "aarch64-3.10": "90793c6179ff32ec3f208d955d3d03cb8d0986aa364fe06fc6c57af6ebb83a09",
+    "mipsel-3.4": "a610fceb56c390b82b4b0c02cebf680bf4b3f59e0da9453a156082280d376443",
+    "LICENSES.txt": "2e602bcc3d0fab2f129bf4de939a4f7ba71d32073683f08b433098ab3e15291c"
+  }
+}

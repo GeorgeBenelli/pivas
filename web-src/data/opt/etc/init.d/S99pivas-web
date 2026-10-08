@@ -1,0 +1,86 @@
+#!/bin/sh
+# init.d для pivas-web через start-stop-daemon (стандарт Entware).
+# Python http.server с Basic Auth + CGI. LAN-only, порт 8888.
+
+NAME=pivas-web
+PY=/opt/bin/python3
+SERVER=/opt/etc/pivas-web/server.py
+AUTH=/opt/etc/pivas-web/auth
+ENABLED=/opt/etc/pivas-web/enabled
+PID_FILE=/tmp/run/pivas-web.pid
+LOG_FILE=/tmp/log/pivas-web.log
+SSD=/opt/sbin/start-stop-daemon
+
+mkdir -p /tmp/run /tmp/log
+
+_start() {
+    unset PIVAS_LOCK_TOKEN PIVAS_LOCK_ENTRY
+    # rc.unslung runs every Entware init script at boot. A saved password alone
+    # must never opt the web server in to consuming RAM on the next boot.
+    if [ ! -f "$ENABLED" ]; then
+        echo "pivas-web выключен; включить: pivas web on"
+        return 0
+    fi
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+        echo "pivas-web уже запущен (pid $(cat "$PID_FILE"))"
+        exit 0
+    fi
+    if [ ! -f "$AUTH" ] || [ ! -s "$AUTH" ]; then
+        echo "Нет auth-конфига. Задайте пароль: pivas web pass <пароль>"
+        exit 1
+    fi
+    if [ ! -x "$PY" ]; then
+        echo "Python3 не найден ($PY). Установите: opkg install python3-base python3-light"
+        exit 1
+    fi
+    if [ ! -x "$SSD" ]; then
+        # fallback: двойной fork (daemon без tools)
+        ( "$PY" "$SERVER" >> "$LOG_FILE" 2>&1 & echo $! > "$PID_FILE" ) &
+    else
+        # busybox start-stop-daemon (короткие флаги)
+        "$SSD" -S -q -b -m -p "$PID_FILE" -O "$LOG_FILE" -x "$PY" -- "$SERVER"
+    fi
+    sleep 2
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+        LAN_IP=$(ip -4 addr show br0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -1)
+        echo "pivas-web запущен: http://${LAN_IP:-192.168.1.1}:8888/"
+    else
+        echo "pivas-web не стартовал, смотри $LOG_FILE"
+        rm -f "$PID_FILE"
+        exit 1
+    fi
+}
+
+_stop() {
+    if [ -x "$SSD" ] && [ -f "$PID_FILE" ]; then
+        "$SSD" -K -q -p "$PID_FILE" 2>/dev/null || true
+    fi
+    if [ -f "$PID_FILE" ]; then
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+        rm -f "$PID_FILE"
+    fi
+    # страховка
+    for p in $(ps w 2>/dev/null | awk "/pivas-web\/server\.py/ && !/awk/ {print \$1}"); do
+        kill -9 "$p" 2>/dev/null
+    done
+    echo "pivas-web остановлен."
+}
+
+_status() {
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+        LAN_IP=$(ip -4 addr show br0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -1)
+        echo "pivas-web: работает (pid $(cat "$PID_FILE"))"
+        echo "URL: http://${LAN_IP:-192.168.1.1}:8888/"
+    else
+        echo "pivas-web: остановлен"
+    fi
+}
+
+case "$1" in
+    start)   _start ;;
+    stop)    _stop ;;
+    restart) _stop; sleep 1; _start ;;
+    status)  _status ;;
+    *)       echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

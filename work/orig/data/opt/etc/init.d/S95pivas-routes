@@ -1,0 +1,142 @@
+#!/bin/sh
+
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+
+# S95pivas-routes — гарантия работы pivas-iptables+route после ребута/reset.
+#
+# upstream pivas при `pivas vpn reset` иногда тихо падает при создании цепочки
+# PIVAS_MARK (функция ip4__route__add_table ожидает dev=Pivas-proxy-vless, но
+# реальное kernel-имя t2s21). В результате без jump+chain+route маркировка
+# пакетов не работает, и весь трафик LAN-клиентов идёт через ISP мимо VPN.
+#
+# Этот скрипт строит всю цепочку идемпотентно:
+#   1) chain PIVAS_MARK с нужными правилами (если её нет)
+#   2) jump PREROUTING -i "$LAN" -m set --match-set PIVAS_LIST dst -j PIVAS_MARK
+#   3) ip rule fwmark 0xd1000 lookup 1001
+#   4) route default dev t2s21 table 1001
+
+ENABLED=1
+PROCS=pivas-routes
+
+LAN=$(sed -n 's/^LAN_INTERFACE=//p' /opt/etc/pivas.conf | head -1)
+LAN=${LAN:-br0}
+case "$LAN" in *[!a-zA-Z0-9_.:-]*) echo 'Некорректный LAN_INTERFACE' >&2; exit 1 ;; esac
+TABLE=1001
+MARK=0xd1000
+CHAIN=PIVAS_MARK
+
+IPT=/opt/sbin/iptables
+[ -x "$IPT" ] || IPT=iptables
+
+# ---- helpers ---------------------------------------------------------------
+_find_tunnel_dev() {
+    for dev in t2s21 tsbr21; do
+        ip link show dev "$dev" 2>/dev/null | grep -q 'state UP\|LOWER_UP' && {
+            echo "$dev"; return 0
+        }
+    done
+    return 1
+}
+
+# ---- chain ----------------------------------------------------------------
+_ensure_chain() {
+    # Compare the entire managed chain, not just the presence of one MARK rule.
+    device_rules=$(/opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py devices rules mangle "$CHAIN") || return 1
+    expected=$(cat <<EOF
+${device_rules}
+-A $CHAIN -m set --match-set PIVAS_DESTINATION_EXCLUDED dst -j RETURN
+-A $CHAIN -p udp -m udp --dport 53 -j RETURN
+-A $CHAIN -p tcp -m tcp --dport 53 -j RETURN
+-A $CHAIN -p icmp -j RETURN
+-A $CHAIN -j CONNMARK --restore-mark --nfmask 0xffffffff --ctmask 0xffffffff
+-A $CHAIN -m mark --mark $MARK -j RETURN
+-A $CHAIN -m conntrack ! --ctstate NEW -j RETURN
+-A $CHAIN -j MARK --set-xmark $MARK/0xffffffff
+-A $CHAIN -j CONNMARK --save-mark --nfmask 0xffffffff --ctmask 0xffffffff
+EOF
+)
+    expected=$(printf '%s\n' "$expected" | sed '/^$/d')
+    # Keenetic may rebuild mangle immediately after the first VPN start. The
+    # chain can disappear between -N and iptables-restore's -F (line 2).
+    # Retry that short race, while still failing on a persistent rule error.
+    for attempt in 1 2 3; do
+        "$IPT" -w -t mangle -N "$CHAIN" 2>/dev/null || true
+        actual=$("$IPT" -w -t mangle -S "$CHAIN" 2>/dev/null | sed '/^-N /d')
+        [ "$actual" = "$expected" ] && return 0
+        # Commit the complete chain in one table transaction, with bypass first.
+        if printf '*mangle\n-F %s\n%s\nCOMMIT\n' "$CHAIN" "$expected" | /opt/sbin/iptables-restore --noflush; then
+            return 0
+        fi
+        [ "$attempt" -lt 3 ] || return 1
+        sleep 1
+    done
+}
+
+# ---- jump из PREROUTING ---------------------------------------------------
+_ensure_jump() {
+    ipset list -n 2>/dev/null | grep -qx PIVAS_LIST || return 1
+    if ! "$IPT" -w -t mangle -C PREROUTING -i "$LAN" -m set --match-set PIVAS_LIST dst -j "$CHAIN" 2>/dev/null; then
+        "$IPT" -w -t mangle -A PREROUTING -i "$LAN" -m set --match-set PIVAS_LIST dst -j "$CHAIN" 2>/dev/null || return 1
+        echo "[pivas-routes] jump PREROUTING → $CHAIN добавлен"
+    fi
+}
+
+# ---- ip rule ---------------------------------------------------------------
+_ensure_rule() {
+    if ! ip rule show | grep -q "fwmark $MARK/$MARK lookup $TABLE"; then
+        ip rule add fwmark "$MARK/$MARK" lookup "$TABLE" pref 1778 2>/dev/null
+        [ "$?" = 0 ] || return 1
+        echo "[pivas-routes] ip rule fwmark $MARK → table $TABLE добавлен"
+    fi
+    return 0
+}
+
+# ---- route ----------------------------------------------------------------
+_ensure_route() {
+    local dev
+    dev=$(_find_tunnel_dev) || {
+        echo "[pivas-routes] tunnel ещё не up" >&2
+        return 1
+    }
+    if ! ip route show table $TABLE 2>/dev/null | grep -q "^default dev $dev\( \|$\)"; then
+        ip route replace default dev "$dev" table $TABLE 2>/dev/null || \
+            ip route add default dev "$dev" table $TABLE 2>/dev/null || return 1
+        echo "[pivas-routes] route default dev $dev table $TABLE добавлен"
+    fi
+    return 0
+}
+
+start() {
+    [ -f /opt/etc/pivas.paused ] && return 0
+    _ensure_chain || return 1
+    _ensure_rule || return 1
+    ip route replace blackhole default metric 32767 table "$TABLE" || return 1
+    _ensure_jump || return 1
+    for attempt in 1 2 3 4 5; do
+        _ensure_route && return 0
+        sleep 1
+    done
+    return 1
+}
+
+stop() {
+    while "$IPT" -w -t mangle -C PREROUTING -i "$LAN" -m set --match-set PIVAS_LIST dst -j "$CHAIN" 2>/dev/null; do
+        "$IPT" -w -t mangle -D PREROUTING -i "$LAN" -m set --match-set PIVAS_LIST dst -j "$CHAIN" || return 1
+    done
+    while ip rule show | grep -q "fwmark $MARK.*lookup $TABLE"; do
+        ip rule del fwmark "$MARK/$MARK" lookup "$TABLE" 2>/dev/null || break
+    done
+    ip route flush table "$TABLE" 2>/dev/null || true
+}
+
+restart() { stop; sleep 1; start; }
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart|reload) restart ;;
+    *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

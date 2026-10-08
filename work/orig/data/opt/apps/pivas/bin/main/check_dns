@@ -1,0 +1,407 @@
+#!/bin/sh
+
+# All state writers share one lock; nested calls retain its owner token.
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py try-locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+
+#------------------------------------------------------------------------------
+#
+#	ПАКЕТ ПИВАС
+#
+#------------------------------------------------------------------------------
+#
+#	Сторожок DNS. Запускается из cron каждую минуту
+#	(/opt/etc/cron.1min/pivas-dns-watchdog), можно вызвать и руками:
+#	    /opt/apps/pivas/bin/main/check_dns          - проверить и починить
+#	    /opt/apps/pivas/bin/main/check_dns status   - только показать состояние
+#
+#	Зачем. Весь DNS домашней сети DNAT'ом (цепочка PIVAS_DNS) заворачивается в
+#	dnsmasq:9753 -> dnscrypt-proxy:9153. Запасного пути нет: если dnsmasq или
+#	dnscrypt-proxy лёг (или dnscrypt-proxy остался без живых серверов), DNS
+#	пропадает у всех клиентов и сам по себе не возвращается. Здесь это лечится:
+#
+#	  1) лежащие службы поднимаем командой start (живые не трогаем);
+#	  2) со 2-й неудачи подряд (~2 мин) перезапускаем только dnscrypt-proxy2
+#	     (он заново опрашивает серверы), далее не чаще раза в 5 минут;
+#	  3) с 3-й неудачи подряд (~3 мин без DNS) аварийно снимаем перехват
+#	     PIVAS_DNS - клиенты уходят на штатный DNS Keenetic. Пока авария
+#	     активна, хук 100-dns-local перехват не возвращает, а если его вернул
+#	     кто-то ещё - сторожок снимает снова на каждом тике;
+#	  4) перехват возвращаем после 2 успешных проверок подряд (защита от
+#	     дребезга), если хук 100-dns-local не отключён вручную.
+#
+#	Отдельно slot-2 (dnscrypt :9154 для доменов pivas-slot2.list): его отказ не
+#	должен ронять DNS всей сети. Лежит - поднимаем/перезапускаем; с 3-й неудачи
+#	временно убираем server=/домен/#9154 (домены slot-2 резолвятся через
+#	slot-1), при восстановлении возвращаем.
+#
+# -----------------------------------------------------------------------------
+#	Дата создания: 17/09/2026
+#	Лицензия: Apache License 2.0
+# -----------------------------------------------------------------------------
+
+PIVAS_CONF_FILE=/opt/etc/pivas.conf
+DNSMASQ_CONF=/opt/etc/dnsmasq.conf
+DNSMASQ_INIT=/opt/etc/init.d/S56dnsmasq
+CRYPT_INIT=/opt/etc/init.d/S09dnscrypt-proxy2
+ADGUARD_INIT=/opt/etc/init.d/S99adguardhome
+DNS_HOOK=/opt/etc/ndm/netfilter.d/100-dns-local
+NDM_LIB=/opt/apps/pivas/bin/libs/ndm
+PAUSE_FLAG=/opt/etc/pivas.paused
+
+STATE_DIR=/opt/tmp
+STATE_FAILS="${STATE_DIR}/pivas-dns-watchdog.fails"
+STATE_OKS="${STATE_DIR}/pivas-dns-watchdog.oks"
+STATE_BYPASS="${STATE_DIR}/pivas-dns-watchdog.bypass"
+STATE_FAILS1="${STATE_DIR}/pivas-dns-watchdog.fails1"
+STATE_FAILS2="${STATE_DIR}/pivas-dns-watchdog.fails2"
+S1_DOWN_FLAG="${STATE_DIR}/pivas-slot1-dns.down"
+S2_DOWN_FLAG="${STATE_DIR}/pivas-slot2-dns.down"
+SERVERS=/opt/etc/dnsmasq.d/pivas.servers
+S2_INIT=/opt/etc/init.d/S10dnscrypt-slot2
+S2_TOML=/opt/etc/dnscrypt-proxy-slot2.toml
+S2_LIST=/opt/etc/pivas-slot2.list
+S2_PORT=9154
+DNSCRYPT_PIN=/opt/apps/pivas/bin/main/dnscrypt_pin
+LOCK_FILE="${STATE_DIR}/pivas-dns-watchdog.lock"
+
+PATH=/opt/sbin:/opt/bin:/opt/usr/sbin:/opt/usr/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+conf_value() {
+	grep "^${1}=" "${PIVAS_CONF_FILE}" 2>/dev/null | head -n 1 | cut -d'=' -f2
+}
+
+log() {
+	logger -t "ПИВАС" "DNS сторожок: ${1}"
+	[ -t 1 ] && echo "${1}"
+}
+
+service_alive() {
+	[ -x "${1}" ] && "${1}" status 2>/dev/null | grep -q alive
+}
+
+# $1 - порт локального резолвера. Успех = A-запись хотя бы для одного домена.
+# Без dig проверить нечем - считаем, что всё в порядке (не мешаем работе).
+dns_probe() {
+    _port="${1}"
+    command -v dig >/dev/null 2>&1 || return 1
+    if [ "$_port" = "${dns_port:-9753}" ]; then
+        dig +time=2 +tries=1 +short @127.0.0.1 -p "$_port" pivas-health.invalid A 2>/dev/null | grep -qx '192.0.2.1'
+        return $?
+    fi
+    # A unique label avoids a healthy-looking response from dnscrypt's old cache.
+    for _zone in cloudflare.com example.com; do
+        dig +time=2 +tries=1 +noall +comments @127.0.0.1 -p "$_port" "pivas-$(date +%s)-$$.$_zone" A 2>/dev/null \
+            | grep -Eq 'status: (NOERROR|NXDOMAIN),' && return 0
+    done
+    return 1
+}
+
+intercept_present() {
+	iptables -w -t nat -S PREROUTING 2>/dev/null | grep -q -- '-j PIVAS_DNS'
+}
+
+# Снимаем только jump в PIVAS_DNS: цепочка остаётся. Флаг STATE_BYPASS читает
+# хук 100-dns-local и перехват не возвращает; если jump вернул кто-то другой
+# (update_iptables, старый хук) - на следующем тике снимем снова.
+intercept_off() {
+	[ -f "${NDM_LIB}" ] || return 1
+	( . "${NDM_LIB}" && ip4__chain__delete_jump nat PIVAS_DNS ) >/dev/null 2>&1
+	touch "${STATE_BYPASS}"
+}
+
+read_counter() {
+	_c=$(cat "${1}" 2>/dev/null)
+	case "${_c}" in ''|*[!0-9]*) _c=0 ;; esac
+	echo "${_c}"
+}
+
+# Возвращаем перехват только если штатный хук не отключён вручную
+# и pivas не на паузе (`pivas stop`).
+intercept_on() {
+	if [ -f "${PAUSE_FLAG}" ]; then
+		log "pivas на паузе (pivas stop) - перехват DNS не возвращаем"
+		return 0
+	fi
+	rm -f "${STATE_BYPASS}" "${STATE_OKS}"
+	if [ -f "${NDM_LIB}" ] && grep -q 'ip4__dns__add_routing_for_home' "${DNS_HOOK}" 2>/dev/null; then
+		( . "${NDM_LIB}" && ip4__dns__add_routing_for_home ) >/dev/null 2>&1
+		log "локальный DNS снова отвечает, перехват PIVAS_DNS возвращён"
+	else
+		log "локальный DNS снова отвечает; перехват PIVAS_DNS не возвращаем - хук 100-dns-local отключён вручную"
+	fi
+}
+
+read_fails() {
+	_f=$(cat "${STATE_FAILS}" 2>/dev/null)
+	case "${_f}" in ''|*[!0-9]*) _f=0 ;; esac
+	echo "${_f}"
+}
+
+show_status() {
+	dns_port=$(conf_value DNSMASQ_PORT); [ -n "${dns_port}" ] || dns_port=9753
+	crypt_port=$(conf_value DNS_CRYPT_PORT); [ -n "${crypt_port}" ] || crypt_port=9153
+	if [ -f "${DNSMASQ_INIT}" ]; then
+		service_alive "${DNSMASQ_INIT}" && s=alive || s=dead
+		dns_probe "${dns_port}" && r=answers || r='no answer'
+		echo "dnsmasq:${dns_port}         ${s}, ${r}"
+	fi
+	if [ -x "${CRYPT_INIT}" ]; then
+		service_alive "${CRYPT_INIT}" && s=alive || s=dead
+		dns_probe "${crypt_port}" && r=answers || r='no answer'
+		echo "dnscrypt slot-1:${crypt_port}   ${s}, ${r}$([ -f "${S1_DOWN_FLAG}" ] && echo ' (FALLBACK: домены списка через провайдера/closed)')"
+		echo "slot-1 failures         $(read_counter "${STATE_FAILS1}")"
+	fi
+	if [ -f "${SERVERS}" ]; then
+		echo "default upstream        $(grep -E '^server=[^/]' "${SERVERS}" | cut -d= -f2 | tr '\n' ' ')"
+		echo "domains slot-1/slot-2   $(grep -c "^server=/.*#${crypt_port}$" "${SERVERS}") / $(grep -c '^server=/.*#9154$' "${SERVERS}")"
+	fi
+	if [ -s "${S2_LIST}" ] && [ -x "${S2_INIT}" ]; then
+		"${S2_INIT}" status 2>/dev/null | grep -q alive && s=alive || s=dead
+		dns_probe "${S2_PORT}" && r=answers || r='no answer'
+		echo "dnscrypt slot-2:${S2_PORT}   ${s}, ${r}$([ -f "${S2_DOWN_FLAG}" ] && echo ' (FALLBACK: домены slot-2 согласно DNS_SLOT2_FALLBACK / DNS_VPN_FAILURE)')"
+		echo "slot-2 failures         $(read_counter "${STATE_FAILS2}")"
+	fi
+	if [ -x "${ADGUARD_INIT}" ]; then
+		service_alive "${ADGUARD_INIT}" && s=alive || s=dead
+		echo "AdGuard Home            ${s}"
+	fi
+	echo "PIVAS_DNS jump           $(iptables -t nat -S PREROUTING 2>/dev/null | grep -q -- '-j PIVAS_DNS' && echo present || echo absent)"
+	echo "table 1001 default      $(ip route show table 1001 2>/dev/null | grep -Eq '^default dev (t2s21|tsbr21)( |$)' && echo present || echo ABSENT)"
+	echo "consecutive failures    $(read_fails)"
+	[ -f "${STATE_BYPASS}" ] && echo "emergency bypass        ACTIVE (клиенты на штатном DNS Keenetic)"
+	[ -f "${PAUSE_FLAG}" ] && echo "pivas pause              ACTIVE (pivas stop, штатный DNS Keenetic)"
+	return 0
+}
+
+watchdog() {
+	# Страховка от разбухшего stdout-лога бота (был случай с 1,1 ГБ на USB).
+	_botlog=/opt/tmp/telegram4pivas.log
+	_botlog_size=$(ls -ln "$_botlog" 2>/dev/null | awk '{print $5}')
+	if [ "${_botlog_size:-0}" -gt 20971520 ]; then
+		tail -c 262144 "$_botlog" > "$_botlog.1" 2>/dev/null
+		: > "$_botlog"
+		log "лог бота превысил 20 МБ — обрезан"
+	fi
+
+	# pivas stop: не возвращаем перехват и подчищаем jump, если NDM его вернул.
+	if [ -f "${PAUSE_FLAG}" ]; then
+        /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py detach >/dev/null 2>&1 || true
+		intercept_off >/dev/null 2>&1 || true
+        /opt/etc/init.d/S95pivas-routes stop >/dev/null 2>&1 || true
+		rm -f "${STATE_BYPASS}" "${STATE_FAILS}" "${STATE_FAILS1}" "${STATE_FAILS2}" "${S1_DOWN_FLAG}" "${S2_DOWN_FLAG}"
+
+		return 0
+	fi
+
+	# Пустая table 1001: сайты из pivas.list (slot-1) не открываются.
+	# cmd_pivas_init / `pivas add` это ломает; чиним на каждом тике.
+	if ! ip route show table 1001 2>/dev/null | grep -Eq '^default dev (t2s21|tsbr21)( |$)'; then
+		if [ -x /opt/etc/init.d/S95pivas-routes ]; then
+			/opt/etc/init.d/S95pivas-routes start >/dev/null 2>&1 || true
+			if ip route show table 1001 2>/dev/null | grep -Eq '^default dev (t2s21|tsbr21)( |$)'; then
+				log "table 1001: default через туннель восстановлен"
+			fi
+		fi
+	fi
+
+	# AdGuard Home вместо dnsmasq: только поднимаем, если лёг.
+	if [ -x "${ADGUARD_INIT}" ] && ! [ -f "${DNSMASQ_INIT}" ]; then
+		service_alive "${ADGUARD_INIT}" || {
+			"${ADGUARD_INIT}" start >/dev/null 2>&1
+			log "AdGuard Home лежал - запущен"
+		}
+		return 0
+	fi
+
+	[ -f "${DNSMASQ_INIT}" ] || return 0
+
+	dns_port=$(conf_value DNSMASQ_PORT); [ -n "${dns_port}" ] || dns_port=9753
+	crypt_port=$(conf_value DNS_CRYPT_PORT); [ -n "${crypt_port}" ] || crypt_port=9153
+	crypt_used=no
+	# split DNS: dnscrypt используется, если он упомянут в dnsmasq.conf или в pivas.servers
+	# (в аварии slot-1 строк в pivas.servers нет, поэтому смотрим и на toml)
+	if [ -x "${CRYPT_INIT}" ]; then
+		if grep -hq "127.0.0.1#${crypt_port}" "${DNSMASQ_CONF}" "${SERVERS}" 2>/dev/null \
+			|| [ -f "${S1_DOWN_FLAG}" ] || [ -f /opt/etc/dnscrypt-proxy.toml ]; then
+			crypt_used=yes
+		fi
+	fi
+
+	# Восстановление управляемых DNS-конфигов после внешних изменений.
+	if [ "${crypt_used}" = yes ] && [ -x /opt/apps/pivas/bin/main/dnscrypt_pin ]; then
+		if [ "$(/opt/apps/pivas/bin/main/dnscrypt_pin)" = changed ]; then
+			log "DNS-конфигурация восстановлена"
+		fi
+	fi
+
+	# dnscrypt слотов проверяем независимо: их отказ не должен ронять DNS всей
+	# сети (вне списков — провайдер), но домены слота без DNS остаться не должны.
+	if [ "${crypt_used}" = yes ]; then
+		watchdog_slot1
+		watchdog_slot2
+	fi
+
+	if dns_probe "${dns_port}"; then
+		rm -f "${STATE_FAILS}"
+		if [ -f "${STATE_BYPASS}" ]; then
+			# Гистерезис: возвращаем перехват после 2 успешных проверок подряд.
+			oks=$(( $(read_counter "${STATE_OKS}") + 1 ))
+			echo "${oks}" > "${STATE_OKS}"
+			if [ "${oks}" -ge 2 ]; then
+				intercept_on
+			else
+				log "локальный DNS ответил (${oks}/2), перехват вернём на следующей проверке"
+			fi
+		fi
+		return 0
+	fi
+
+	rm -f "${STATE_OKS}"
+	fails=$(( $(read_fails) + 1 ))
+	echo "${fails}" > "${STATE_FAILS}"
+	log "dnsmasq:${dns_port} не отвечает (неудача №${fails})"
+
+	# Авария активна, а перехват кто-то вернул (update_iptables, старый хук) -
+	# клиенты снова на мёртвом DNS. Снимаем сразу, до попыток лечения.
+	if [ -f "${STATE_BYPASS}" ] && intercept_present; then
+		intercept_off && log "авария: перехват PIVAS_DNS вернулся при лежащем DNS - снят снова"
+	fi
+
+	# 1. Поднимаем лежащие службы. start у rc.func идемпотентен ("already running").
+	service_alive "${DNSMASQ_INIT}" || {
+		"${DNSMASQ_INIT}" start >/dev/null 2>&1
+		log "dnsmasq лежал - запущен"
+	}
+	if [ "${crypt_used}" = yes ] && ! service_alive "${CRYPT_INIT}"; then
+		"${CRYPT_INIT}" start >/dev/null 2>&1
+		log "dnscrypt-proxy2 лежал - запущен"
+	fi
+	sleep 3
+	if dns_probe "${dns_port}"; then
+		rm -f "${STATE_FAILS}"
+		log "восстановлен после запуска служб"
+		return 0
+	fi
+
+	# 2. dnsmasq жив, но не резолвит вне списков - провайдер (ndnproxy :53 / DNS_PROVIDER)
+	#    не отвечает. Перезапуск dnscrypt тут не поможет (им занимается watchdog_slot1);
+	#    на 2-й неудаче перечитываем провайдера (мог сменится WAN) и перезапускаем dnsmasq.
+	if [ "${fails}" -ge 2 ] && [ $(( (fails - 2) % 5 )) -eq 0 ]; then
+		[ -x "${DNSCRYPT_PIN}" ] && "${DNSCRYPT_PIN}" dnsmasq >/dev/null 2>&1
+		"${DNSMASQ_INIT}" restart >/dev/null 2>&1
+		log "dnsmasq не резолвит через провайдера - servers-file пересобран, dnsmasq перезапущен"
+		sleep 3
+		if dns_probe "${dns_port}"; then
+			rm -f "${STATE_FAILS}"
+			log "восстановлен после перезапуска dnsmasq"
+			return 0
+		fi
+	fi
+
+	# 3. ~3 минуты без DNS - отдаём клиентов штатному DNS Keenetic.
+	if [ "${fails}" -ge 3 ] && ! [ -f "${STATE_BYPASS}" ]; then
+		if intercept_off; then
+			log "DNS не восстановлен за ${fails} проверок, перехват PIVAS_DNS снят - клиенты на штатном DNS Keenetic"
+		fi
+	fi
+	return 1
+}
+
+# dnscrypt slot-1 (:9153, запросы через xray :1096). Лежит xray — лежит и он.
+watchdog_slot1() {
+	if dns_probe "${crypt_port}"; then
+		rm -f "${STATE_FAILS1}"
+		if [ -f "${S1_DOWN_FLAG}" ]; then
+            oks=$(( $(read_counter "${STATE_DIR}/pivas-slot1-dns.oks") + 1 ))
+            echo "$oks" > "${STATE_DIR}/pivas-slot1-dns.oks"
+            [ "$oks" -ge 2 ] || return 0
+            rm -f "${STATE_DIR}/pivas-slot1-dns.oks"
+			rm -f "${S1_DOWN_FLAG}"
+			[ -x "${DNSCRYPT_PIN}" ] && "${DNSCRYPT_PIN}" dnsmasq >/dev/null 2>&1
+			log "slot-1: dnscrypt:${crypt_port} снова отвечает, домены списка снова через VPN-DNS"
+		fi
+		return 0
+	fi
+	rm -f "${STATE_DIR}/pivas-slot1-dns.oks"
+	fails1=$(( $(read_counter "${STATE_FAILS1}") + 1 ))
+	echo "${fails1}" > "${STATE_FAILS1}"
+	log "slot-1: dnscrypt:${crypt_port} не отвечает (неудача №${fails1})"
+	if ! service_alive "${CRYPT_INIT}"; then
+		"${CRYPT_INIT}" start >/dev/null 2>&1
+		log "slot-1: dnscrypt лежал - запущен"
+	elif ! pidof xray >/dev/null 2>&1; then
+		log "slot-1: xray не запущен - DNS через VPN невозможен"
+	elif [ "${fails1}" -ge 2 ] && [ $(( (fails1 - 2) % 5 )) -eq 0 ]; then
+		"${CRYPT_INIT}" restart >/dev/null 2>&1
+		log "slot-1: dnscrypt не резолвит - перезапущен"
+	fi
+	if [ "${fails1}" -ge 3 ] && ! [ -f "${S1_DOWN_FLAG}" ]; then
+		touch "${S1_DOWN_FLAG}"
+		[ -x "${DNSCRYPT_PIN}" ] && "${DNSCRYPT_PIN}" dnsmasq >/dev/null 2>&1
+		_pol=$(conf_value DNS_VPN_FAILURE); [ -n "${_pol}" ] || _pol=closed
+		if [ "${_pol}" = closed ]; then
+			log "slot-1: DNS через VPN не восстановлен за ${fails1} проверок - домены списка НЕ резолвятся (DNS_VPN_FAILURE=closed)"
+		else
+			log "slot-1: DNS через VPN не восстановлен за ${fails1} проверок - домены списка временно через провайдера"
+		fi
+	fi
+	return 1
+}
+
+# dnscrypt slot-2 (:9154). Нужен только когда pivas-slot2.list не пуст.
+watchdog_slot2() {
+	if ! [ -s "${S2_LIST}" ] || ! [ -f "${S2_TOML}" ] || ! [ -x "${S2_INIT}" ]; then
+		rm -f "${STATE_FAILS2}"
+		return 0
+	fi
+	if dns_probe "${S2_PORT}"; then
+		rm -f "${STATE_FAILS2}"
+		if [ -f "${S2_DOWN_FLAG}" ]; then
+            oks=$(( $(read_counter "${STATE_DIR}/pivas-slot2-dns.oks") + 1 ))
+            echo "$oks" > "${STATE_DIR}/pivas-slot2-dns.oks"
+            [ "$oks" -ge 2 ] || return 0
+            rm -f "${STATE_DIR}/pivas-slot2-dns.oks"
+			rm -f "${S2_DOWN_FLAG}"
+			[ -x "${DNSCRYPT_PIN}" ] && "${DNSCRYPT_PIN}" dnsmasq >/dev/null 2>&1
+			log "slot-2: dnscrypt:${S2_PORT} снова отвечает, домены slot-2 снова через свой DNS"
+		fi
+		return 0
+	fi
+	rm -f "${STATE_DIR}/pivas-slot2-dns.oks"
+	fails2=$(( $(read_counter "${STATE_FAILS2}") + 1 ))
+	echo "${fails2}" > "${STATE_FAILS2}"
+	log "slot-2: dnscrypt:${S2_PORT} не отвечает (неудача №${fails2})"
+	if ! "${S2_INIT}" status 2>/dev/null | grep -q alive; then
+		"${S2_INIT}" start >/dev/null 2>&1
+		log "slot-2: dnscrypt лежал - запущен"
+	elif [ "${fails2}" -ge 2 ] && [ $(( (fails2 - 2) % 5 )) -eq 0 ]; then
+		"${S2_INIT}" restart >/dev/null 2>&1
+		log "slot-2: dnscrypt не резолвит - перезапущен"
+	fi
+	if [ "${fails2}" -ge 3 ] && ! [ -f "${S2_DOWN_FLAG}" ]; then
+		touch "${S2_DOWN_FLAG}"
+		[ -x "${DNSCRYPT_PIN}" ] && "${DNSCRYPT_PIN}" dnsmasq >/dev/null 2>&1
+		log "slot-2: DNS не восстановлен за ${fails2} проверок - домены slot-2 используют DNS_SLOT2_FALLBACK / DNS_VPN_FAILURE"
+	fi
+	return 1
+}
+
+mkdir -p "${STATE_DIR}" 2>/dev/null
+
+case "${1}" in
+	status)
+		show_status
+		;;
+	*)
+		# не даём двум сторожкам работать одновременно
+		if command -v flock >/dev/null 2>&1; then
+			exec 9>"${LOCK_FILE}" || exit 0
+			flock -n 9 || exit 0
+		fi
+		watchdog
+		;;
+esac

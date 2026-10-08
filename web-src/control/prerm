@@ -1,0 +1,4 @@
+#!/bin/sh
+[ -f /opt/etc/init.d/S99pivas-web ] && /opt/etc/init.d/S99pivas-web stop 2>/dev/null || true
+rm -f /opt/etc/pivas-web/www/cgi-bin/clients.sh
+exit 0

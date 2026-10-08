@@ -1,0 +1,105 @@
+#!/bin/sh
+
+# All state writers share one lock; nested calls retain its owner token.
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py try-locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+
+source /opt/apps/pivas/bin/libs/main
+
+get_config_value(){
+        grep "${1}" "${PIVAS_CONF_FILE}" | cut -d'=' -f2
+}
+get_current_entware_vpn_interface() {
+        inface_entware=$(get_config_value INFACE_ENT)
+        inface=$(grep "${inface_entware}" "${INFACE_NAMES_FILE}" | cut -d'|' -f2)
+        echo "${inface}"
+}
+
+get_current_cli_vpn_interface() {
+        inface_entware=$(get_config_value INFACE_ENT)
+        inface=$(grep "${inface_entware}" "${INFACE_NAMES_FILE}"  | cut -d'|' -f1)
+        echo "${inface}"
+}
+
+ENTWARE_INTERFACE=$(get_current_entware_vpn_interface)
+CLI_INTERFACE=$(get_current_cli_vpn_interface)
+
+reset_logger(){
+        logger -t "ПИВАС"  "Осуществляем перезапуск ${CLI_INTERFACE}::${ENTWARE_INTERFACE}"
+}
+
+
+restart_ssr_connection(){
+        reset_logger
+        /opt/etc/init.d/S22shadowsocks restart &>/dev/null
+}
+restart_vpn_connection(){
+
+        cli_request="localhost:79/rci/interface/${CLI_INTERFACE}"
+        reset_logger
+        curl -s -d '{"down":"true"}' "${cli_request}"
+        sleep 1
+        curl -s -d '{"up":"true"}' "${cli_request}"
+}
+
+get_host_ip(){
+        # Удаляем из имени хоста все звездочки (*) в выражениях *domain.com
+        # и символы косой четы и все что после нее в выражения XX.XX.XX.XX/10,
+        # получая на выходе XX.XX.XX.XX
+        host="${1//\*}"; dns="${2}"; host="${host///*}";
+        nslookup  "${host}" "${dns}" \
+                | sed -n '/Name/,/Address/ p' \
+                | grep Address \
+                | cut -d: -f2 \
+                | cut -d' ' -f2\
+                | grep -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
+}
+
+get_ip_from_pivas(){
+        ub_tag=pivas
+        host_list=/opt/etc/pivas.list
+        num=0; ip=''
+        dns=$(get_config_value DNS_DEFAULT | cut -d'#' -f1)
+        while read -r host || [ -n "${host}" ]; do
+                ip=$(get_host_ip "${host}" "${dns}")
+                if [ -n "${ip}" ]; then
+                        if ipset list "${ub_tag}" | grep -q "${ip}" || \
+                           ([ -f /opt/etc/AdGuardHome/AdGuardHome.yaml ] && grep -q "${host}/${ub_tag}" /opt/etc/AdGuardHome/AdGuardHome.yaml) ; then
+                                break
+                        fi
+                fi
+        done < "${host_list}"
+        echo "${ip}"
+}
+
+test_ip(){
+
+        ip="${1}"
+        ping -I "${ENTWARE_INTERFACE}" "${ip}" -i 10 &>/dev/null || {
+                restart_vpn_connection
+        }
+}
+
+test_connection(){
+
+        if echo "${ENTWARE_INTERFACE}" | grep -q ezcfg ; then
+        	ssr_ip=$(cat < "${SHADOWSOCKS_CONF}" | grep '"server"'| sed 's/.*:.*"\(.*\)".*/\1/')
+        	# если пинг на сервер ssr не проходит или статус сервиса отличен от alive, то перезапускаем сервис ssr
+            if ! ping -c1 "${ssr_ip}" >/dev/null || /opt/etc/init.d/S22shadowsocks status | grep -vq alive ; then
+                        restart_ssr_connection
+            fi
+        else
+#        	если соединение отлично от ssr и его состояния: state и link отличны от up,
+#        	а состояние флага connected отлично от состояния yes, то vpn соединение перезапускаем
+			if curl -s "http://localhost:79/rci/show/interface" | jq -r '.[] | select(.id=="'"${CLI_INTERFACE}"'" and .state=="up" and .link=="up") | .connected' | grep -qv 'yes' ; then
+					restart_vpn_connection
+			fi
+
+        fi
+
+
+}
+
+test_connection &

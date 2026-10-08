@@ -1,0 +1,45 @@
+#!/bin/sh
+
+# All state writers share one lock; nested calls retain its owner token.
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py try-locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+
+
+#------------------------------------------------------------------------------
+#
+#	ПАКЕТ ПИВАС
+#
+#------------------------------------------------------------------------------
+#
+#	Данный файл служит для создания новых правил маркировки трафика по протоколу IPv4
+#	при использовании VPN подключения отличного от shadowsocks.
+#	Они срабатывают при перезаписи правил в таблице netfilter
+#	https://github.com/ndmsystems/packages/wiki/Opkg-Component
+#	основными задачами являются:
+#
+#	1. Создание pivas таблицы для ipset ip4
+#	2. Проверка на наличие ускорения трафика (аппаратное и программное)
+#	3. В зависимости от наличия ускорения включаем те или иные правила маркировки трафика
+#
+# ------------------------------------------------------------------------------
+#	Дата создания: 21/05/2022
+#	Лицензия: Apache License 2.0
+# ------------------------------------------------------------------------------
+
+# pivas stop: VPN на паузе, маркировать трафик в мёртвый туннель нельзя —
+# иначе сайты из списка не открываются ни через VPN, ни напрямую.
+[ -f /opt/etc/pivas.paused ] && exit 0
+
+# IPv4
+if [ "${type}" = 'iptables' ] ; then
+	# Роутинг данных VPN в mangle
+	# Роутинг DNS в nat
+	if [ "${table}" = 'mangle' ] || [ "${table}" = 'nat' ] ; then
+		. /opt/apps/pivas/bin/libs/ndm
+
+		ip4_firewall_set_all_rules &>/dev/null
+        /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py devices firewall || exit 1
+	fi
+fi

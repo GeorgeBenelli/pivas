@@ -1,0 +1,288 @@
+#!/bin/sh
+. /opt/apps/pivas/bin/libs/vpn
+
+#------------------------------------------------------------------------------
+#
+#	ПАКЕТ ПИВАС
+#
+#------------------------------------------------------------------------------
+#
+#	Данный файл служит для создания файла блокировки рекламы /opt/etc/hosts,
+#	где основными задачами являются:
+#
+#	1. Загрузка данных по ссылкам в файле /opt/etc/adblock.sources для блокировки рекламных хостов
+#	2. Сортировка и удаление дубликатов
+#	3. Исключение записей списочного файла из списка блокировки
+#
+# -----------------------------------------------------------------------------
+#	Дата создания: 21/05/2022
+#	Лицензия: Apache License 2.0
+# -----------------------------------------------------------------------------
+
+[ -z "${1}" ] && echo "Загрузка хостов для блокировки из источников..."
+logger -t "pivas" "Запущен файл ${0}"
+
+tmp_path="/opt/tmp/adblock"
+TMP_FILE="/opt/tmp/hosts.tmp"
+TMP_ADS_FILE="/opt/tmp/hosts.ads"
+DNSMASQ_DEMON="/opt/etc/init.d/S56dnsmasq"
+ERROR_SOURCE="/opt/tmp/pivas.err.log"
+ADS_SOURCES_FILE="/opt/etc/adblock/sources.list"
+ADBLOCK_LIST_EXCEPTION="/opt/etc/adblock/exception.list"
+
+grepv="#|^$|localhost| local|broadcasthost|loopback|localnet|mcastprefix|allnodes|allrouters|allhosts| 0.0.0.0"
+# блокируем различные популярные в РФ счетчики и определители IP
+mkdir -p "${tmp_path}"
+
+#--------------------------------------------------------------
+#
+# 	Включаем в список блокировки уже
+# 	зарекомендовавшие себя 100% рекламные домены
+#
+#--------------------------------------------------------------
+add_regular_ads(){
+
+cat <<EOF > "${TMP_ADS_FILE}"
+0.0.0.0 ezstat.ru
+0.0.0.0 iplogger.org
+0.0.0.0 2no.co
+0.0.0.0 iplogger.com
+0.0.0.0 iplogger.ru
+0.0.0.0 yip.su
+0.0.0.0 iplogger.co
+0.0.0.0 iplogger.info
+0.0.0.0 ipgrabber.ru
+0.0.0.0 ipgraber.ru
+0.0.0.0 iplis.ru
+0.0.0.0 myip2.ru
+EOF
+}
+
+
+#--------------------------------------------------------------
+#
+# 	Проверяем на наличие необходимые файлы
+#
+#--------------------------------------------------------------
+check_files_present(){
+	! [ -f "${ADS_SOURCES_FILE}" ] && {
+		cp -f /opt/apps/pivas/etc/conf/adblock.sources "${ADS_SOURCES_FILE}"
+		 ! [ -f "${ADS_SOURCES_FILE}" ] && {
+			error "Файл с ссылками на списки блокировки рекламы отсутствует.";
+			exit 1
+			}
+	}
+	[ -d "${tmp_path}" ] && rm -rf "${tmp_path}"; mkdir -p "${tmp_path}"
+	[ -f "${ERROR_SOURCE}" ] && rm -f "${ERROR_SOURCE}"
+}
+
+
+#--------------------------------------------------------------
+#
+# 	Загружаем из источников рекламные доменные имена
+#
+#--------------------------------------------------------------
+load_adblock_hosts(){
+
+	score=0; hosts=0
+	total=$(cat < "${ADS_SOURCES_FILE}" | sed '/^$/d; /^#/d' | wc -l )
+	while read -r source || [ -n "${source}" ]; do
+
+		[  -z "${source}" ] && continue
+		[ "${source::1}" = "#" ] && continue
+
+		score=$((score+1))
+		curl "${source}" -o "${TMP_FILE}" &>/dev/null
+
+	#	пропускаем все файлы с html кодом
+		if [ -n "$(grep -E '<html>|<head>|<body>' "${TMP_FILE}")" ]; then
+			echo "${source}" >> ${ERROR_SOURCE}
+			rm -f "${TMP_FILE}";
+			continue
+		fi
+
+		cat < "${TMP_FILE}" | grep -vE "${grepv}" >> "${ADBLOCK_HOSTS_FILE}"
+		progress_bar "${score}" "${total}" ""
+
+	done < "${ADS_SOURCES_FILE}"
+	printf "\n"
+	print_line
+
+	cat "${TMP_ADS_FILE}" "${ADBLOCK_HOSTS_FILE}" > "${TMP_FILE}"
+	mv "${TMP_FILE}"  "${ADBLOCK_HOSTS_FILE}"
+
+
+	if [ -f ${ERROR_SOURCE} ]; then
+		mess_1="Следующие ссылки не корректны и содержат HTML код"
+		mess_2="Отредактируйте их должным образом ${ADS_SOURCES_FILE}"
+		error "${mess_1}"; error "${mess_2}"
+		logger "${mess_1}"; logger "${mess_2}"
+		print_line
+	fi
+
+}
+
+#--------------------------------------------------------------
+#
+# 	Удаляем дубликаты
+#
+#--------------------------------------------------------------
+remove_duplicates(){
+	ready "Сортировка и удаление дубликатов"
+	nlines_all=$(cat < "${ADBLOCK_HOSTS_FILE}" | wc -l)
+	cat < "${ADBLOCK_HOSTS_FILE}" | sort -u > ${TMP_FILE}
+	nlines_sorted=$(cat < "${TMP_FILE}" | wc -l)
+	when_ok "ГОТОВО"
+}
+
+#--------------------------------------------------------------
+#
+# 	Удаляем все доменные имена, которые у нас имеются
+# 	в  защищенный список (белый список)
+#
+#--------------------------------------------------------------
+remove_white_hosts(){
+
+	nlines_amount=$(cat < "${ADBLOCK_HOSTS_FILE}" | wc -l)
+	if [ -f "${PIVAS_LIST_FILE}" ] && [ "$(cat < "${PIVAS_LIST_FILE}" | wc -l )" -ge 1 ]; then
+		exclude_com=".*.$(cat < "${PIVAS_LIST_FILE}" | tr -d '*' | sed ':a;N;$!ba;s/\n/$|.*./g')$"
+		ready "Удаляем хосты, находящиеся в защищенном списке"
+		cat < "${TMP_FILE}" | grep -vE "${exclude_com}" > "${ADBLOCK_HOSTS_FILE}"
+		when_ok "ГОТОВО"
+		nlines_excluded_wl=$(cat < "${ADBLOCK_HOSTS_FILE}" | wc -l)
+		rm "${TMP_FILE}"
+
+	else
+		mv "${TMP_FILE}" "${ADBLOCK_HOSTS_FILE}"
+		nlines_excluded_wl="${nlines_sorted}"
+	fi
+}
+
+#--------------------------------------------------------------
+#
+# 	Удаляем все доменные имена, которые у нас имеются
+# 	в списке исключений (белый список)
+#
+#--------------------------------------------------------------
+remove_exception_hosts(){
+
+	nlines_amount=$(cat < "${ADBLOCK_HOSTS_FILE}" | wc -l)
+	if [ -f "${ADBLOCK_LIST_EXCEPTION}" ] && [ "$(cat < "${ADBLOCK_LIST_EXCEPTION}" | wc -l )" -ge 1 ]; then
+		ready "Удаляем хосты, находящиеся в списке исключений"
+		exclude_all="$(get_separated_host_list "${ADBLOCK_LIST_EXCEPTION}")"
+		sed -i "/${exclude_all}/d" "${ADBLOCK_HOSTS_FILE}"
+		when_ok "ГОТОВО"
+		nlines_excluded_ex=$(cat < "${ADBLOCK_HOSTS_FILE}" | wc -l)
+	else
+		nlines_excluded_ex="${nlines_amount}"
+	fi
+}
+
+
+
+#--------------------------------------------------------------
+#
+# 	Тестируем полученный список доменных имен
+# 	блокировки рекламы на dnsmasq
+#
+#--------------------------------------------------------------
+dnsmasq_test(){
+	[ -f "${DNSMASQ_DEMON}" ] && {
+		if grep -q alive "${DNSMASQ_DEMON}"; then
+			ready "Проверяем на ошибки скаченные файлы"
+			/opt/sbin/dnsmasq --test --hostsdir="${tmp_path}"  &> /dev/null
+			if [ "$?" = 0 ]; then
+				when_ok "ГОТОВО"
+				logger "Рекламных хостов для блокировки добавлено $(dig_frm ${hosts}) шт."
+			else
+				when_bad "ОШИБКИ"
+				mess="Проверьте файл ${ADBLOCK_HOSTS_FILE} на ошибки"
+				error "${mess}"; logger "${mess}"
+			fi
+		fi
+	}
+}
+
+#--------------------------------------------------------------
+#
+# 	Отображаем результаты произведенных
+# 	манипуляций со списком блокировки
+#
+#--------------------------------------------------------------
+result_show(){
+
+	nlines_srt=$((nlines_all - nlines_sorted))
+	nlines_exc_wl=$((nlines_sorted - nlines_excluded_wl))
+	nlines_exc_ex=$((nlines_excluded_wl - nlines_excluded_ex))
+
+	print_line
+
+	mess="Скачено хостов для блокировки рекламы"
+	nlines_all_txt=$(dig_frm "${nlines_all}")
+	ready "${mess}"; when_alert "${nlines_all_txt}"
+	logger "${mess} ${nlines_all_txt}"
+
+	mess="Количество удаленных дубликатов"
+	nlines_srt_txt=$(dig_frm "${nlines_srt}")
+	ready "${mess}"; when_alert "${nlines_srt_txt}"
+	logger "${mess} ${nlines_srt_txt}"
+
+	mess="Исключено записей из списка блокировки"
+	nlines_exc_txt_wl=$(dig_frm "${nlines_exc_wl}")
+	ready "${mess}"; when_alert "${nlines_exc_txt_wl}"
+	logger "${mess} ${nlines_exc_txt_wl}"
+
+	mess="Исключено записей из списка исключений"
+	nlines_exc_txt_ex=$(dig_frm "${nlines_exc_ex}")
+	ready "${mess}"; when_alert "${nlines_exc_txt_ex}"
+	logger "${mess} ${nlines_exc_txt_ex}"
+
+	print_line
+
+	mess="ИТОГО ДОБАВЛЕНО ХОСТОВ ДЛЯ БЛОКИРОВКИ РЕКЛАМЫ"
+	nlines_add_txt=$(dig_frm "${nlines_excluded_ex}")
+	ready "${mess}"; when_alert "${nlines_add_txt}"
+	logger "${mess} ${nlines_add_txt}"
+}
+
+
+#--------------------------------------------------------------
+#
+# 	Перезапускаем сервис dnsmasq
+#
+#--------------------------------------------------------------
+restart_dnsmasq(){
+	[ -f "${DNSMASQ_DEMON}" ] && {
+        if grep -q alive "${DNSMASQ_DEMON}"; then
+                "${DNSMASQ_DEMON}" restart &> /dev/null
+        fi
+	} || exit 0
+}
+
+
+#--------------------------------------------------------------
+#
+# 	Основной блок запуска
+#
+#--------------------------------------------------------------
+# Включаем в список блокировки уже зарекомендовавшие себя 100% рекламные домены
+add_regular_ads
+# Проверяем на наличие необходимые файлы
+check_files_present
+print_line
+# Загружаем из источников рекламные доменные имена
+load_adblock_hosts
+# Удаляем возможные дубликаты
+remove_duplicates
+# Удаляем все доменные имена, которые у нас имеются в защищенный список (белый список)
+# и в списке исключений
+remove_white_hosts
+remove_exception_hosts
+# Отображаем результаты произведенных манипуляций со списком блокировки
+result_show
+# Тестируем полученный список доменных имен блокировки рекламы на dnsmasq
+dnsmasq_test
+#print_line
+# Перезапускаем сервис dnsmasq
+restart_dnsmasq
+

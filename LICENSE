@@ -1,0 +1,20 @@
+Licensing of Pivas
+==================
+
+Original Pivas additions and the Apache-licensed KVAS-derived portions are
+provided under Apache License 2.0; see licenses/Apache-2.0.txt.
+This statement does not relicense third-party code.
+
+The distribution is a collection of components with different terms:
+- KVAS: Apache-2.0; original notice in licenses/KVAS-LICENCE.md.
+- Xray-core: MPL-2.0; see vendor/xray/LICENSE and source references.
+- Vendored pyTelegramBotAPI: GPL-2.0; see licenses/pyTelegramBotAPI-GPL-2.0.txt.
+  Embedded files may carry additional notices, which are retained.
+- QUIC probe dependencies and Go: see vendor/quic-probe/LICENSES.txt
+  and vendor/xray/GO-LICENSE.
+- Original telegram4kvas bot code: upstream licensing has not been established.
+  No Apache or MIT grant for that code is asserted by this project.
+
+The full source/binary bundle is prepared for review. Resolve the upstream bot
+permission before public redistribution of the full bundle. See
+THIRD_PARTY_NOTICES.md for the evidence and scope.

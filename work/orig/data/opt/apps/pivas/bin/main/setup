@@ -1,0 +1,903 @@
+#!/bin/sh
+. /opt/apps/pivas/bin/libs/main
+. /opt/apps/pivas/bin/libs/vpn
+. /opt/apps/pivas/bin/libs/vless
+
+# В случае проблем с инсталляцией пакета ставим в значение true
+ANSWER_AGH=n
+
+log_in_file(){
+	if [ "${1}" = line ]; then
+		print_line >> "${INSTALL_LOG}"
+	else
+		echo "${1}" >> "${INSTALL_LOG}"
+	fi
+}
+
+
+# Проверяем отключено ли использование DNS провайдера
+setup_test_provider_dns(){
+
+	is_dns_override && {
+		echo "Подключаем DNS провайдера..."
+		echo "В случае, выхода из сессии, зайдите снова по ssh и выполните команду 'pivas setup'"
+		post_api_query '[{"opkg": {"no dns-override": true}},{"system": {"configuration": {"save": true}}}]' &>/dev/null && when_ok || when_err
+	} 
+	# if ! is_dns_override ; then
+	# 	cli="$(get_router_host)/a"
+	# 	log_in_file "ОШИБКА: Не отключено использование DNS провайдера."
+	# 	echo -e "${RED}Для корректной работы DNS сервера необходимо отключить использование DNS провайдера!${NOCL}"
+	# 	echo -e "С этой целью зайдите в админ панель роутера по адресу: ${GREEN}${cli}${NOCL}"
+	# 	echo "и выполните последовательно три следующих команды: "
+	# 	print_line
+	# 	echo -e "1. ${GREEN}opkg dns-override${NOCL}           - отключаем использование DNS провайдера,"
+	# 	echo -e "2. ${GREEN}system configuration save${NOCL}   - сохраняем изменения,"
+	# 	echo -e "3. ${GREEN}system reboot${NOCL}               - перегружаем роутер."
+	# 	print_line
+	# 	exit 1
+	# fi
+}
+
+setup_print_welcome(){
+
+	[ -n "${APP_RELEASE}" ] && full_version="${APP_VERSION} ${APP_RELEASE}" || full_version="${APP_VERSION}"
+	welcome="Установка пакета ${GREEN}ПИВАС${NOCL} версии ${GREEN}${full_version}${NOCL}"
+	echo -e "${welcome}"
+	print_line
+
+	log_in_file "${welcome}"
+	log_in_file line
+	log_in_file "Начало установки: $(date "${DATE_FORMAT}")"
+	log_in_file line
+}
+setup_adguard(){
+
+	if cmd_adguardhome_status | grep -qE "(ВКЛЮЧЕН|ОТКЛЮЧЕН)" ; then
+		warning "На роутере обнаружен AdGuard Home "
+		read_ynq_timer "Установить AdGuard Home, как основной DNS сервер" ANSWER_AGH Y 10
+		if [ "${ANSWER_AGH}" = q ] ; then exit_q; print_line; exit 1; fi
+		if echo "${ANSWER_AGH}" | grep -qi y; then
+			cmd_adguardhome_on
+			log_in_file "AdGuard Home НАСТРОЕН, как основной DNS сервер"
+		else
+			log_in_file "AdGuard Home пропущен."
+			cmd_adguardhome_status | grep -q "ВКЛЮЧЕН" && {
+				ready "Останавливаем сервис AdGuard Home..."
+				/opt/etc/init.d/S99adguardhome stop &> /dev/null
+				if /opt/etc/init.d/S99adguardhome status | grep -q dead; then
+					when_ok "УСПЕШНО"
+				else
+					when_bad "ОШИБКА"
+					mess="Невозможно остановить сервис AdGuard Home"
+					error "${mess}"
+					log_in_file "ОШИБКА: ${mess}"
+					exit 1
+				fi
+			}
+			cp /opt/etc/AdGuardHome/AdGuardHome.yaml "${PIVAS_BACKUP_PATH}"/AdGuardHome.yaml
+		fi
+		print_line
+	fi
+}
+
+#
+#	Функция восстановления архивных файлов конфигурации пакета
+#	$1 - архивный файл конфигурации
+#	$2 - файл в который необходимо восстановить (назначение)
+#	$3 - описание файла в родительном падеже при склонении слова файл - "чего"?, например, "защищенного списка"
+#
+restore_backup(){
+
+	backup_file="${1}"
+	dest_file="${2}"
+	description="${3}"
+
+#	Проверяем сохраняли ли ранее файлы конфигурации в архивную папку?
+	if [ -f "${backup_file}" ]; then
+#		warning "Обнаружен архивный файл ${description}..."
+		log_in_file "Файл ${description} ВОССТАНОВЛЕН из архива."
+		ready "Файл ${description} ${BLUE}восстановлен${NOCL}"
+		if mv -f "${backup_file}" "${dest_file}" ; then
+			when_ok "УСПЕШНО"
+		else
+			when_bad "ОШИБКА"
+			log_in_file "ОШИБКА: ${description} не восстановлен."
+			exit 1
+		fi
+#		print_line
+	else
+#		Если нет архивной копии файла, то в случае наличия файла
+#		по умолчанию в настройках пакета - восстанавливаем его
+		file_name=$(basename "${dest_file}")
+		pivas_config_path=/opt/apps/pivas/etc/conf
+
+		if [ -f "${pivas_config_path}/${file_name}" ]; then
+#			warning "Архивный файл ${description} не обнаружен."
+			ready "Копируем файл ${description} по умолчанию"
+			if cp -f "${pivas_config_path}/${file_name}" "${dest_file}" &>/dev/null ; then
+				log_in_file "УСТАНОВЛЕН файл ${description} ПО УМОЛЧАНИЮ."
+				when_ok "УСПЕШНО"
+			else
+				when_bad "ОШИБКА"
+				log_in_file "ОШИБКА: файл ${description} по умолчанию не восстановлен."
+				exit 1
+			fi
+#			print_line
+		fi
+	fi
+
+}
+
+
+
+# Функция временной остановки работы пакета
+cmd_pause_pivas(){
+
+	ready "Временно приостановливаем работу Пиваса..."
+	{
+		ip4__flush &> /dev/null
+
+		# Архивируем файлы механизма ndm
+		[ -f /opt/etc/ndm/iflayerchanged.d/100-pivas-vpn ] && {
+			mv /opt/etc/ndm/iflayerchanged.d/100-pivas-vpn ${PIVAS_BACKUP_PATH}/100-pivas-vpn-layer
+		}
+		[ -f /opt/etc/ndm/iflayerchanged.d/pivas-ips-reset ] && {
+			mv /opt/etc/ndm/iflayerchanged.d/pivas-ips-reset ${PIVAS_BACKUP_PATH}/pivas-ips-reset-layer
+		}
+		[ -f /opt/etc/ndm/ifstatechanged.d/pivas-ips-reset ] && {
+			mv /opt/etc/ndm/ifstatechanged.d/100-pivas-vpn ${PIVAS_BACKUP_PATH}/100-pivas-vpn-state
+		}
+		[ -f /opt/etc/ndm/netfilter.d/100-proxy-redirect ] && {
+			mv /opt/etc/ndm/netfilter.d/100-proxy-redirect ${PIVAS_BACKUP_PATH}/100-proxy-redirect 
+		}
+		[ -f /opt/etc/ndm/netfilter.d/100-vpn-mark ] && {
+			mv /opt/etc/ndm/netfilter.d/100-vpn-mark ${PIVAS_BACKUP_PATH}/100-vpn-mark
+		}
+	} &> /dev/null && when_ok "УСПЕШНО" || when_bad "C ОШИБКАМИ"
+}
+
+restart_all_services(){
+
+	if cmd_adguardhome_status | grep -qE "(ВКЛЮЧЕН|ОТКЛЮЧЕН)" ; then
+		service_action dnsmasq stop
+		service_action shadowsocks stop 
+		service_action adguardhome restart 
+	else
+		if has_ssr_enable ; then
+			service_action xray stop
+			service_action shadowsocks restart 
+		else
+			service_action xray restart 
+			service_action dnsmasq restart 
+			get_dns_crypt_status | grep -q "on" && {
+				service_action dnscrypt-proxy2 restart  
+			}
+		fi
+
+	fi
+
+
+
+}
+# Функция восстановления архивных файлов конфигурации пакета
+cmd_unpause_pivas(){
+
+	ready "Восстанавливаем работу Пиваса после паузы..."
+	{
+		#  Восстанавливаем из архива файлы механизма ndm
+		[ -f ${PIVAS_BACKUP_PATH}/100-pivas-vpn-layer ] && {
+			mv ${PIVAS_BACKUP_PATH}/100-pivas-vpn-layer /opt/etc/ndm/iflayerchanged.d/100-pivas-vpn 
+		}
+		[ -f ${PIVAS_BACKUP_PATH}/100-pivas-vpn-layer ] && {
+			mv ${PIVAS_BACKUP_PATH}/100-pivas-vpn-layer /opt/etc/ndm/iflayerchanged.d/100-pivas-vpn 
+		}
+		[ -f ${PIVAS_BACKUP_PATH}/100-pivas-vpn-state ] && {
+			mv ${PIVAS_BACKUP_PATH}/100-pivas-vpn-state /opt/etc/ndm/ifstatechanged.d/100-pivas-vpn
+		}
+		[ -f ${PIVAS_BACKUP_PATH}/100-proxy-redirect ] && {
+			mv ${PIVAS_BACKUP_PATH}/100-proxy-redirect /opt/etc/ndm/netfilter.d/100-proxy-redirect  
+		}
+		[ -f ${PIVAS_BACKUP_PATH}/100-vpn-mark ] && {
+			mv ${PIVAS_BACKUP_PATH}/100-vpn-mark /opt/etc/ndm/netfilter.d/100-vpn-mark 
+		}	
+
+		cmd_pivas_init
+		restart_all_services
+
+	} &> /dev/null && when_ok "УСПЕШНО" || when_bad "C ОШИБКАМИ"
+	
+}
+
+
+#------------------------------------------------------
+# 	ВОССТАНАВЛИВАЕМ СОСТОЯНИЕ AdGuardHome,
+# 	КОТОРОЕ БЫЛО ПЕРЕД УСТАНОВКОЙ ПАКЕТА ПИВАС
+#------------------------------------------------------
+restore_adguard(){
+
+	agh_service=/opt/etc/init.d/S99adguardhome
+	ready "Восстанавливаем службу AdGuardHome"
+	if [ -f "${PIVAS_BACKUP_PATH}/S99adguardhome.origin" ]; then
+
+		cp "${PIVAS_BACKUP_PATH}/S99adguardhome.origin" "${agh_service}"
+		[ -f /opt/etc/AdGuardHome/AdGuardHome.yaml ] && \
+			cp /opt/etc/AdGuardHome/AdGuardHome.yaml /opt/bin/AdGuardHome.yaml
+	fi
+
+	if /opt/etc/init.d/S99adguardhome status | grep -q "alive" ; then
+		sed -i '/case/,/esac/ s/^\(.*\)/#\1/; /\*)/,/;;/ s/#\(.*rc.func\)/\1/' "${agh_service}"
+		"${agh_service}" restart &> /dev/null
+	fi
+	[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+}
+
+#------------------------------------------------------
+# 	ОСТАНАВЛИВАЕМ dnsmasq
+#------------------------------------------------------
+stop_dnsmasq(){
+
+	if /opt/etc/init.d/S56dnsmasq status | grep -q "alive"; then
+		ready "Останавливаем службу dnsmasq "
+		service_action dnsmasq stop &> /dev/null
+		[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+	fi
+	# Dependency-owned init scripts must remain available after removing Pivas.
+	return 0
+}
+
+
+#------------------------------------------------------
+# 	ОСТАНАВЛИВАЕМ dnscrypt-proxy2
+#------------------------------------------------------
+stop_crypt(){
+	if /opt/etc/init.d/S09dnscrypt-proxy2 status | grep -q "alive"; then
+		ready "Останавливаем службу dnscrypt-proxy2 "
+		service_action dnscrypt-proxy2 stop &> /dev/null
+		[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+	fi
+
+	return 0
+}
+
+# восставившем архивные копии файлов конфигурации
+restore_backups(){
+	restore_backup "${PIVAS_LIST_FILE_BACKUP}" "${PIVAS_LIST_FILE}" "защищенного списка"
+	restore_backup "${PIVAS_CONFIG_BACKUP}" "${PIVAS_CONF_FILE}" "конфигурации пакета Пивас"
+
+	restore_backup "${ADGUARDHOME_CONFIG_BACKUP}" "${ADGUARDHOME_CONFIG}" "конфигурации AdGuardHome"
+	restore_backup "${ADGUARD_IPSET_FILE_BACKUP}" "${ADGUARD_IPSET_FILE}" "списка ipset для AdGuardHome"
+
+	restore_backup "${SHADOWSOCKS_CONF_BACKUP}" "${SHADOWSOCKS_CONF}" "конфигурации Shadowsocks"
+
+	restore_backup "${DNSMASQ_CONFIG_BACKUP}" "${DNSMASQ_CONFIG}" "конфигурации dnsmasq"
+	restore_backup "${DNSMASQ_IPSET_HOSTS_BACKUP}" "${DNSMASQ_IPSET_HOSTS}" "списка ipset для dnsmasq"
+
+	restore_backup "${VLESS_CONFIG_FILE_BACKUP}" "${VLESS_CONFIG_FILE}" "конфигурации xray vless"
+
+	restore_backup "${DNSCRYPT_CONFIG_BACKUP}" "${DNSCRYPT_CONFIG}" "конфигурации dnscrypt_proxy2"
+	restore_backup "${ADBLOCK_LIST_EXCEPTION_BACKUP}" "${ADBLOCK_LIST_EXCEPTION}" "списка хостов-исключений для блокировки рекламы"
+	restore_backup "${ADBLOCK_HOSTS_FILE_BACKUP}" "${ADBLOCK_HOSTS_FILE}" "списка хостов для блокировки рекламы"
+	restore_backup "${ADBLOCK_SOURCES_LIST_BACKUP}" "${ADBLOCK_SOURCES_LIST}" "списка источников хостов для блокировки рекламы"
+#	restore_backup "${}" "${}" ""
+	print_line
+}
+
+
+# Сохраняем все значимые файлы конфигурации пакета Пивас
+save_backups(){
+	backup_copy "${PIVAS_CONF_FILE}" "${PIVAS_CONFIG_BACKUP}"
+	backup_copy "${PIVAS_LIST_FILE}" "${PIVAS_LIST_FILE_BACKUP}"
+
+	backup_copy "${ADGUARDHOME_CONFIG}" "${ADGUARDHOME_CONFIG_BACKUP}"
+	backup_copy "${ADGUARD_IPSET_FILE}" "${ADGUARD_IPSET_FILE_BACKUP}"
+
+	backup_copy "${SHADOWSOCKS_CONF}" "${SHADOWSOCKS_CONF_BACKUP}"
+
+	backup_copy "${DNSMASQ_CONFIG}" "${DNSMASQ_CONFIG_BACKUP}"
+	backup_copy "${DNSMASQ_IPSET_HOSTS}" "${DNSMASQ_IPSET_HOSTS_BACKUP}"
+
+	backup_copy "${VLESS_CONFIG_FILE}" "${VLESS_CONFIG_FILE_BACKUP}"
+
+	backup_copy "${DNSCRYPT_CONFIG}" "${DNSCRYPT_CONFIG_BACKUP}"
+
+	backup_copy "${ADBLOCK_HOSTS_FILE}" "${ADBLOCK_HOSTS_FILE_BACKUP}"
+	backup_copy "${ADBLOCK_SOURCES_LIST}" "${ADBLOCK_SOURCES_LIST_BACKUP}"
+	backup_copy "${ADBLOCK_LIST_EXCEPTION}" "${ADBLOCK_LIST_EXCEPTION_BACKUP}"
+
+#	backup_copy "${}" "${}"
+}
+
+list__backup() {
+	if [ -z "${1}" ] ; then
+		if [ -f "${PIVAS_LIST_FILE}" ] ; then
+			list__backup "${PIVAS_LIST_FILE}"
+		elif [ -f "${PIVAS_LIST_FILE_BACKUP}" ] ; then
+			list__backup "${PIVAS_LIST_FILE_BACKUP}"
+		fi
+
+		return
+	fi
+	local source_file="${1}"
+
+	local backup_path="${HOME}/pivas"
+	local backup_filename
+	backup_filename=$( date '+%y-%m-%d' )
+	backup_filename="list_${backup_filename}.txt"
+	local backup2_file="${backup_path}2_${backup_filename}"
+
+	# проверка, что файл старого формата
+	# -n не перезаписываем, если сегодняшний бекап уже есть
+	if grep -qF '*' "${source_file}" ; then
+		local backup1_file="${backup_path}1_${backup_filename}"
+		if [ -f "${backup1_file}" ] ; then
+			return
+		fi
+
+		echo "Резервная копия списка старого формата в ${backup1_file}"
+		cp "${source_file}" "${backup1_file}"
+
+		if ! [ -f "${backup2_file}" ] ; then
+			echo "Преобразуем в новый формат в ${backup2_file}"
+			sed 's/\*\.//g;s/\*//g' "${source_file}" >"${backup2_file}"
+		fi
+	elif ! [ -f "${backup2_file}" ] ; then
+		echo "Резервная копия списка в ${backup2_file}"
+		cp "${source_file}" "${backup2_file}"
+	fi
+}
+
+#------------------------------------------------------
+# УДАЛЕНИЕ ФАЙЛОВ
+#------------------------------------------------------
+rm_dir()(  [ -d "${1}" ] && rm -rf "${1}" || true)
+rm_file()( [ -e "${1}" ] || [ -L "${1}" ] && rm -f "${1}"  || true )
+
+#------------------------------------------------------
+# УДАЛЕНИЕ ФАЙЛОВ КОНФИГУРАЦИИ
+#------------------------------------------------------
+rm_package_files() {
+	local full=${1:-no}
+
+	if [ "${full}" = full ] ; then
+		ready 'Удаляем архивные копии пакета Пивас' && {
+			find /opt ! -path '/opt/packages/*' ! -path '/opt/lib/opkg/*' ! -path "${HOME}/*" \
+			  -name '*pivas*' ! -regex '.*/pivas[a-zA-Z].*' \
+			  -exec rm -rf {} +
+
+			rm_file /opt/etc/inface_equals
+			rm_file /opt/etc/pivas.conf
+			rm_file /opt/etc/pivas.list
+
+			rm_dir /opt/etc/.pivas
+
+			# корректно ли так поступать вместо opkg remove?
+			rm_file /opt/etc/init.d/S22shadowsocks
+		} && when_ok || when_bad
+	fi
+	ready 'Удаляем файлы пакета Пивас' && {
+		rm_file /opt/etc/ndm/netfilter.d/100-dns-local
+		rm_file /opt/etc/ndm/netfilter.d/100-vpn-mark
+		rm_file /opt/etc/ndm/netfilter.d/100-proxy-redirect
+
+		rm_file /opt/etc/ndm/ifcreated.d/pivas-iface-add
+		rm_file /opt/etc/ndm/ifdestroyed.d/pivas-iface-del
+		rm_file /opt/etc/ndm/iflayerchanged.d/pivas-ips-reset
+		rm_file /opt/etc/ndm/iflayerchanged.d/100-pivas-vpn
+		rm_file /opt/etc/ndm/ifstatechanged.d/100-pivas-vpn
+
+		rm_file /opt/etc/ndm/fs.d/15-pivas-start.sh
+		rm_file /opt/etc/cron.5mins/check_vpn
+		rm_file /opt/etc/cron.5mins/pivas-dns-watchdog
+		rm_file /opt/etc/cron.1min/pivas-dns-watchdog
+		rm -f /opt/tmp/pivas-dns-watchdog.* /opt/tmp/pivas-slot2-dns.down 2>/dev/null
+		rm -f /opt/etc/pivas.paused 2>/dev/null
+
+		rm_file /opt/etc/dnsmasq.d/pivas.dnsmasq
+		rm_dir /opt/etc/adblock
+		rm_dir /opt/tmp/adblock
+
+		rm_file /opt/bin/pivas
+		rm_dir /opt/apps/pivas
+	} && when_ok || when_bad
+}
+
+rm_previous_version_files() {
+	#rm_file /opt/etc/ndm/netfilter.d/100-dns-local
+	# текущие, создадутся при включении соединения
+	rm_file /opt/etc/ndm/netfilter.d/100-vpn-mark
+	rm_file /opt/etc/ndm/netfilter.d/100-proxy-redirect
+
+	# текущие, создадутся в cmd_install позже
+	rm_file /opt/etc/ndm/ifcreated.d/pivas-iface-add
+	rm_file /opt/etc/ndm/ifdestroyed.d/pivas-iface-del
+	rm_file /opt/etc/ndm/iflayerchanged.d/pivas-ips-reset
+	rm_file /opt/etc/ndm/iflayerchanged.d/100-pivas-vpn
+	rm_file /opt/etc/ndm/ifstatechanged.d/100-pivas-vpn
+	# исторический
+	rm_file /opt/etc/ndm/wan.d/internet-up
+
+	# исторические
+	rm_file /opt/etc/ndm/fs.d/100-vpn
+	rm_file /opt/etc/ndm/fs.d/100-ipset
+
+	# текущий, создастся при включении соединения
+	rm_file /opt/etc/cron.5mins/check_vpn
+	# исторический
+	rm_file /opt/etc/cron.5mins/ipset.pivas
+	# оптимизированные
+	rm_file /opt/etc/cron.hourly/ipset.pivas
+	rm_file /opt/etc/cron.daily/ipset.pivas
+
+	# текущие, создадутся позже
+	rm_file /opt/etc/dnsmasq.d/pivas.dnsmasq
+	rm_dir /opt/etc/adblock
+	rm_dir /opt/tmp/adblock
+	# исторические
+	rm_file /opt/etc/ads_exception.list
+	rm_file /opt/etc/hosts.list
+	rm_dir /opt/etc/.backup
+
+	# бекапы
+	rm_dir /opt/etc/.pivas
+}
+
+clear_previous_version_net_rules() {
+	ip4__rule__delete_mark_to_table
+	ip4__route__flush_table
+
+	ip4__chain__delete_jump 'nat'    'PIVAS_DNS'
+	ip4__chain__delete      'nat'    'PIVAS_DNS'
+
+	#24-12-21 7791b886b2f233a71447c985ec8dfe57c53cab40
+	ip4__chain__delete_jump 'mangle' 'PIVAS_MARK'
+	ip4__chain__delete      'mangle' 'PIVAS_MARK'
+	#24-11-27 7bda08de3472da3a8e6f17903f65ff10c899ceb7
+	ip4__chain__delete_jump 'mangle' 'PIVAS_MARK_TO_TABLE'
+	ip4__chain__delete      'mangle' 'PIVAS_MARK_TO_TABLE'
+	ip4__chain__delete_jump 'nat'    'PIVAS_DNAT_TO_PORT'
+	ip4__chain__delete      'nat'    'PIVAS_DNAT_TO_PORT'
+	#24-11-26 10c31fcf4c1a9b201b7e21946a9ee055a82a9183
+	ip4__chain__delete_jump 'mangle' 'PIVAS_VPN_FAST'
+	ip4__chain__delete      'mangle' 'PIVAS_VPN_FAST'
+	#24-11-26 df8b36e2e64ae3844073518ce9a6db64c8bb7efd
+	ip4__chain__delete_jump 'nat'    'PIVAS_PROXY_TCP'
+	ip4__chain__delete      'nat'    'PIVAS_PROXY_TCP'
+	ip4__chain__delete_jump 'nat'    'PIVAS_PROXY_UDP'
+	ip4__chain__delete      'nat'    'PIVAS_PROXY_UDP'
+	#24-11-26 0e67e8aa45ba287c02a1e270f9f56afe76b72b2c
+	ip4__chain__delete_jump 'mangle' 'PIVAS_VPN'
+	ip4__chain__delete      'mangle' 'PIVAS_VPN'
+	# давно
+	ip4__chain__delete_jump 'mangle' 'VPNREDIR'
+	ip4__chain__delete      'mangle' 'VPNREDIR'
+	ip4__chain__delete_jump 'nat'    'SHADOWSOCKS'
+	ip4__chain__delete      'nat'    'SHADOWSOCKS'
+	ip4__chain__delete_jump 'nat'    'SHADOWSOCKS_UDP_MARK'
+	ip4__chain__delete      'nat'    'SHADOWSOCKS_UDP_MARK'
+
+	# ss доцепочечных времён
+	iptables__delete_rules 'nat' 'PIVAS_LIST'
+	iptables__delete_rules 'nat' 'pivas_ipset'
+	iptables__delete_rules 'nat' 'pivas'
+	iptables__delete_rules 'nat' 'unblock'
+
+	# dns доцепочечных времён
+	iptables__delete_rules 'nat' '--dport 9753 -j DNAT'
+	iptables__delete_rules 'nat' '--dport 53 -j DNAT'
+
+	#24-12-15 b3dec7293bb8e3de59cce200b4e8dc8d4b9f3dac
+	ip4__ipset__destroy 'PIVAS_DESTINATION_EXCLUDED'
+	#24-11-26 5efb5035c33fffb18c5d17cd7c56e453b0b64ac8
+	ip4__ipset__destroy 'PIVAS_RESERVED'
+
+	#ToDo: найти почему вываливаются с ошибкой
+	#24-11-29 0dabaa19b8dc788d56650b20092dec4a9dce1acc
+	ip4__ipset__destroy 'PIVAS_LIST'
+	#24-11-09 fb1f8cb5755dd4c7b683b314096ccf903ee05525
+	ip4__ipset__destroy 'pivas_ipset'
+	#24-09-07 f78979503e9866f2dca3770455b241c3db8f850d
+	ip4__ipset__destroy 'pivas'
+	# давно
+	ip4__ipset__destroy 'unblock'
+}
+
+cmd_install(){
+
+#	Если режим обновления, то не спрашиваем про выбор соединения,
+#	а просто берем его из файла конфигурации Пиваса
+	update_mode=${1:-false}
+
+	log_warning 'Установка пакета ПИВАС начата...'
+
+	list__backup
+
+	ready 'Удаляем файлы предыдущих версий'
+	rm_previous_version_files && when_ok || when_bad
+
+	echo 'Очищаем сетевые правила предыдущих версий'
+	clear_previous_version_net_rules
+
+	# стартуем ipset'ы, используемые DNS-серверами
+	# до старта самих DNS-серверов
+	ip4__ipset__create_list
+
+#	обновляем itpables
+	opkg update &> /dev/null
+	opkg list-installed | grep -q 'nano' && opkg remove nano &> /dev/null
+	opkg list-installed | grep -q 'dnsmasq-full' && opkg remove dnsmasq-full --force-depends &> /dev/null
+	opkg install dnsmasq-full --force-maintainer &>/dev/null
+	opkg install iptables nano-full &>/dev/null
+
+	# Устанавливаем прокси пакет
+	cmd_install_proxy_package || return 1
+
+	[ "${update_mode}" ] || setup_print_welcome
+	mkdir -p "${PIVAS_BACKUP_PATH}"
+	cat /dev/null > "${INSTALL_LOG}"
+
+	[ -d "/opt/etc/ndm/iflayerchanged.d" ] || mkdir -p /opt/etc/ndm/iflayerchanged.d
+	hook_dir=$(get_hook_dir); home_dir=/opt/apps/pivas
+	ln -sf "${home_dir}/etc/ndm/${hook_dir}/100-pivas-vpn" "/opt/etc/ndm/${hook_dir}/100-pivas-vpn"
+	ln -sf "${home_dir}/etc/ndm/iflayerchanged.d/pivas-ips-reset" "/opt/etc/ndm/iflayerchanged.d/pivas-ips-reset"
+	ln -sf "${home_dir}/etc/ndm/ifcreated.d/pivas-iface-add" "/opt/etc/ndm/ifcreated.d/pivas-iface-add"
+	ln -sf "${home_dir}/etc/ndm/ifdestroyed.d/pivas-iface-del" "/opt/etc/ndm/ifdestroyed.d/pivas-iface-del"
+
+	check_crypto_ssr_libs
+
+	[ -f "${PIVAS_START_FILE}" ] || cp -f /opt/apps/pivas/etc/init.d/S96pivas "${PIVAS_START_FILE}"
+	chmod +x "${PIVAS_START_FILE}"
+
+	# Если не установлен xray - устанавливаем его
+	has_xray_installed || opkg install xray &> /dev/null
+	# Создаем ссылку на наш скрипт для запуска xray в /opt/etc/init.d 
+	[ -f "${XRAY_INIT}" ] || ln -s /opt/apps/pivas/etc/init.d/S97xray ${XRAY_INIT}
+
+	# Код отключения IPv6 не помогает
+	#if [ "$(ipv6_status)" = 0 ]; then
+	#	ipv6_inface_off "$(get_defaultgw_interface)"
+	#fi
+	# В pivas debug dns сейчас есть подсказка по отключению DHCPv6 централизованно.
+	# Также выводится в конце установки.
+	# Но применять её или IPv6 отключать руками — решать пользователю,
+	# т.к. с отключением IPv6 можно потерять некоторых провайдеров.
+
+	local_ip=$(get_router_ip)
+	set_config_value DNSMASQ_LISTEN_IP "${local_ip}"
+
+	#------------------------------------------------------
+	# Сейчас необходимо выбрать VPN интерфейс для работы пакета
+	#------------------------------------------------------
+	if [ "${update_mode}" ]; then
+
+		#------------------------------------------------------
+		# меняем номер старой версии пакета на новый
+		#------------------------------------------------------
+		new_ver=$(get_config_value APP_VERSION)
+		new_rel=$(get_config_value APP_RELEASE)
+
+		#------------------------------------------------------
+		# ВОССТАНАВЛИВАЕМ ФАЙЛ СО СПИСКОМ РАЗБЛОКИРОВКИ
+		#------------------------------------------------------
+		restore_backups
+
+		set_config_value APP_VERSION "${new_ver}"
+		set_config_value APP_RELEASE "${new_rel}"
+		#------------------------------------------------------
+
+		inface_entware=$(get_config_value INFACE_ENT)
+		cli_inface=$(get_config_value INFACE_CLI)
+
+#		Проверяем были ли внесены изменения в файл конфигурации
+		if [ -z "${inface_entware}" ] || [ -z "${cli_inface}" ] ; then
+			echo -e "${BLUE}Информация об интерфейсах отсутствует!${NOCL}"
+			echo -e "${BLUE}Запускаем процедуру выбора интерфейсов...${NOCL}"
+			print_line
+			#	производим сканирование интерфейсов
+			cmd_interface_change no install
+		else
+#			Если изменений не было, то восстанавливаем соединение
+			switch_vpn_on "${inface_entware}" "${cli_inface}"
+		fi
+
+	else
+#		производим сканирование интерфейсов
+		cmd_interface_change yes install
+	fi
+	log_in_file "$(cmd_vpn_status)"
+	print_line
+	#------------------------------------------------------
+	# AdGuard Home
+	#------------------------------------------------------
+	setup_adguard
+
+	#----------------------------------------------------------
+	#
+	# 	В случае, если установить AdGuard Home отказались
+	# 	или не был обнаружен сервис AdGuard Home
+	# 	AdGuard Home подменяет сразу несколько сервисов
+	# 	таких как dnsmasq + dnscrypt_proxy2 + блокировка рекламы
+	#
+	#----------------------------------------------------------
+
+	if [ "${ANSWER_AGH}" = n ]; then
+	
+		if [ -f "${ADGUARDHOME_DEMON}" ]; then
+			if "${ADGUARDHOME_DEMON}" status | grep -q alive; then
+				"${ADGUARDHOME_DEMON}" stop &> /dev/null
+			fi
+		fi
+
+		#------------------------------------------------------
+		# DNSMASQ
+		#------------------------------------------------------
+		dnsmasq_install 'install'
+		#------------------------------------------------------
+		# DNSCRYPT-PROXY2
+		#------------------------------------------------------
+		dns_crypt_install
+		log_in_file "Шифрование DNS трафика (dnscrypt-proxy2) ВКЛЮЧЕНО."
+		#------------------------------------------------------
+		# Блокировка рекламы
+		#------------------------------------------------------
+		log_in_file "Блокировка рекламы НЕ УСТАНОВЛЕНА.."
+		print_line
+	#	fi
+	fi
+
+	# Подключаем библиотеку keen_api
+	#source /opt/apps/pivas/bin/libs/keen_api
+	# Устанавливаем DNS роутера и порт по умолчанию
+	#set_dns_router_server_ip "$(get_router_ip)" "${MAIN_DNS_PORT}"
+
+	# Закрываем снаружи DNS порты для всех вншних сетей
+	# deny_firewall_port "53" "tcp" "Пивас: закрываем снаружи 53/TCP DNS порт"
+	# deny_firewall_port "53" "udp" "Пивас: закрываем снаружи 53/UDP DNS порт"
+	# allow_firewall_local_net_to_port "53" "tcp" "Пивас: разрешаем локальной сети обращения в 53/TCP DNS порт"
+	# allow_firewall_local_net_to_port "53" "udp" "Пивас: разрешаем локальной сети обращения в 53/UDP DNS порт"
+	# # Устанавливаем вышесозданные правила на первое место в списке правил
+	# set_firewall_order_for_rule "53" "tcp" "deny" "0"
+	# set_firewall_order_for_rule "53" "udp" "deny" "0"
+	# set_firewall_order_for_rule "53" "udp" "permit" "0"
+	# set_firewall_order_for_rule "53" "udp" "permit" "0"
+	# Записываем изменения в конфиг
+	#save_system_configuration_by_api
+
+	#------------------------------------------------------
+	# 	Запускаем ПИВАС в работу
+	#------------------------------------------------------
+	ready "Запускаем ПИВАС в работу"
+	if cmd_pivas_init &> /dev/null ; then
+		when_ok "УСПЕШНО"
+	else
+		when_bad "ОШИБКА"
+		ready "Пробуем перезапустить ПИВАС снова"
+		if cmd_pivas_init &> /dev/null ; then
+			when_ok "УСПЕШНО"
+		else
+			when_bad "ОШИБКА"
+			mess="Проблема при запуске ПИВАСа"
+			log_in_file "ОШИБКА: ${mess}"
+			exit 1
+		fi
+	fi
+
+	set_config_value 'SETUP_FINISHED' 'true'
+	log_warning 'Установка пакета ПИВАС завершена'
+
+	print_line
+	echo 'Установка пакета ПИВАС завершена.'
+	echo -e "Для справки по командам введите ${BLUE}pivas help${NOCL}."
+
+	local output
+
+	output="$(hint__if_ndnproxy_disabled)"
+	if [ -n "${output}" ] ; then
+		echo
+		echo "${output}"
+
+		log_in_file 'Показан совет включить системный DNS.'
+	fi
+
+	output="$(hint__if_dns_ipv6)"
+	if [ -n "${output}" ] ; then
+		echo
+		echo "${output}"
+
+		log_in_file 'Показан совет отключить DHCPv6.'
+	fi
+
+	log_in_file line
+	log_in_file "Установка завершена $(date "${DATE_FORMAT}")"
+}
+
+# WGET='/opt/bin/wget -q --no-check-certificate'
+# Вы полняем команду отключения DNS провайдера без перезагрузки и выхода из сессии
+# rci_post()($WGET -qO - --post-data="$1" localhost:79/rci/ > /dev/null 2>&1)
+
+
+#------------------------------------------------------
+#  Обрабатываем режим тестировщика 
+#  удаляем под ноль все запущенные службы
+#------------------------------------------------------
+all_services_rm_develop_mode() {
+
+	if cmd_adguardhome_status | grep -q "ВКЛЮЧЕН" ; then
+		ready "Останавливаем и удаляем службу AdGuardHome "
+		{
+			${ADGUARDHOME_DEMON} stop &> /dev/null 
+			rm_file /opt/etc/AdGuardHome/AdGuardHome.yaml
+			opkg remove adguardhome-go --force-depends &> /dev/null
+		} && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+		
+	else 
+		
+		if has_ssr_enable ; then
+			ready "Останавливаем службу Shadowsocks "
+			{
+				# Останавливаем сервер SSR
+				/opt/etc/init.d/S22shadowsocks stop &> /dev/null 
+				rm_file /opt/etc/shadowsocks.json
+				opkg remove shadowsocks-libev --force-depends &> /dev/null
+
+			} && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+		else
+			ready "Останавливаем службу dnsmasq "
+			{
+				/opt/etc/init.d/S56dnsmasq stop &> /dev/null 
+				rm_file /opt/etc/dnsmasq.conf
+				opkg remove dnsmasq --force-depends &> /dev/null
+			} && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+
+			ready "Останавливаем службу dnscrypt-proxy2 "
+			{
+				/opt/etc/init.d/S09dnscrypt-proxy2 stop &> /dev/null 
+				rm_file /opt/etc/dnscrypt-proxy.toml
+				opkg remove dnscrypt-proxy2 --force-depends &> /dev/null
+			} && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+		fi
+	fi
+}
+
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Удаляет полностью пакет Пивас с устройства
+#	 $1 - тип удаления
+#		<ПУСТО> - если без аргументов, то удаляем без удаления пакетов, но со всеми архивами
+#	 	full - удаляем полностью со всеми ранее установленными пакетами и файлами архивов
+#	 $2 - делаем ли запрос при удалении пакета о подтверждении удаления или нет
+#	 		если аргумент yes - то вопрос задаем,
+#	 		если иное - то пропускаем запрос на удаление пакета
+#
+# ------------------------------------------------------------------------------------------
+cmd_uninstall() {
+
+	rm_type=${1}; sure="${2}";
+	answer_yes='y|Y|Yes|yes|YES|да|Да|ДА'
+	[ -n "${APP_RELEASE}" ] && rel="-${APP_RELEASE}" || rel=''
+	echo -e "Удаление пакета ${GREEN}ПИВАС™${NOCL} версии ${GREEN}${APP_VERSION}${rel}${NOCL}..."
+
+
+	if [ -n "${rm_type}" ] && [[ "${rm_type}" =~ "${answer_yes}" ]] \
+		|| [[ "${sure}" =~ "${answer_yes}" ]] ; then
+		answer=y; sure=y
+	else
+		print_line
+		answer=''; read_ynq_timer "Вы уверены в удалении пакета ?" answer N 12
+		if [ "${answer}" = q ] ; then exit_q; print_line; exit 1; fi
+	fi
+
+	if echo "${answer}" | grep -qi y ; then
+		if [ "${rm_type}" = full ]; then
+			mess="Удаляем все архивные данные и все зависимые пакеты..."
+			rm -f /opt/etc/init/K56dnsmasq  /opt/etc/init/K09dnscrypt-proxy2
+		elif [ "${rm_type}" == develop ] ; then
+			all_services_rm_develop_mode
+		else
+#			Сохраняем значимые файлы конфигурации
+			save_backups
+			mess="Удаляем все архивные данные, зависимые пакеты оставляем."
+		fi
+		[ -z "${sure}" ] && print_line
+		echo "${mess}"
+
+		list__backup
+
+		# Возвращаем persistent-сетевые настройки Keenetic до удаления файлов.
+		# Иначе после opkg remove / вынимания флешки может остаться
+		# opkg dns-override=true: системный DNS Keenetic выключен, а Entware
+		# dnsmasq уже недоступен. Симптом — интернет возвращается только после
+		# factory reset. Делаем best-effort, без падения uninstall.
+		if command -v curl >/dev/null 2>&1; then
+			ready 'Возвращаем штатный DNS Keenetic '
+			curl -s -m 5 -d '[{"opkg":{"no dns-override":true}},{"system":{"configuration":{"save":true}}}]' \
+				localhost:79/rci/ >/dev/null 2>&1 && when_ok 'УСПЕШНО' || when_bad 'ОШИБКА'
+			ready 'Удаляем принадлежащие Pivas Proxy21/Proxy22 '
+			/opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py remove-proxy >/dev/null 2>&1 && when_ok 'УСПЕШНО' || when_bad 'ОШИБКА'
+		fi
+		[ -x /opt/etc/init.d/S97pivas-clients ] && /opt/etc/init.d/S97pivas-clients stop >/dev/null 2>&1 || true
+		[ -x /opt/apps/pivas/bin/libs/clients-vpn ] && /opt/apps/pivas/bin/libs/clients-vpn flush >/dev/null 2>&1 || true
+		[ -x /opt/etc/init.d/S10dnscrypt-slot2 ] && /opt/etc/init.d/S10dnscrypt-slot2 stop >/dev/null 2>&1 || true
+		[ -x /opt/etc/init.d/S95pivas-routes ] && /opt/etc/init.d/S95pivas-routes stop >/dev/null 2>&1 || true
+
+		if has_ssr_enable ; then
+			ready 'Останавливаем службу Shadowsocks '
+			/opt/etc/init.d/S22shadowsocks stop &>/dev/null && when_ok 'УСПЕШНО' || when_bad 'ОШИБКА'
+			config__restore_from_opkg "${SHADOWSOCKS_CONF}"
+		fi
+		if cmd_adguardhome_status | grep -q 'ВКЛЮЧЕН' ; then
+			ready 'Останавливаем службу AdGuardHome '
+			${ADGUARDHOME_DEMON} stop &>/dev/null && when_ok 'УСПЕШНО' || when_bad 'ОШИБКА'
+			config__restore_from_opkg "${ADGUARDHOME_CONFIG}"
+		else
+			ready 'Останавливаем службу DNSMasq '
+			${DNSMASQ_DEMON} stop &>/dev/null && when_ok 'УСПЕШНО' || when_bad 'ОШИБКА'
+			config__restore_from_opkg "${DNSMASQ_CONFIG}"
+
+			ready 'Останавливаем службу DNSCrypt '
+			${DNSCRYPT_DEMON} stop &>/dev/null && when_ok 'УСПЕШНО' || when_bad 'ОШИБКА'
+			config__restore_from_opkg "${DNSCRYPT_CONFIG}"
+		fi
+
+		# Подключаем библиотеку keen_api
+		#source /opt/apps/pivas/bin/libs/keen_api
+		# Удаляем DNS сервера, установленне для Пиваса
+		#del_dns_router_server_ip $(get_router_ip) ${MAIN_DNS_PORT}
+		# Устанавливаем DNS роутера и порт по умолчанию
+		#set_dns_router_server_ip "77.88.8.8" "53"
+
+		# Удаляем правила в брандмауэре, установленные при инсталяции Пиваса
+		# del_firewall_rules 53 tcp "deny"
+		# del_firewall_rules 53 udp "deny"
+
+		# Удаляем правила в брандмауэре, установленные при инсталяции Пиваса
+		# local _local_net="$(get_router_ip | cut -d'.' -f1-3).0"
+		# del_firewall_rules 53 tcp "permit" "${_local_net}"
+		# del_firewall_rules 53 udp "permit" "${_local_net}"
+
+		# Сохраняем конфигурацию
+		#save_system_configuration_by_api
+
+		#ready 'Очищаем используемые сетевые правила...'
+		# Нормально отработает, пока все файлы на месте.
+		# Ведь внутри может проверять тип текущего тоннеля и прочее.
+		#ip4__flush &> /dev/null
+		#if [ $? = 0 ]; then when_ok 'УСПЕШНО'; else when_bad 'ОШИБКА'; fi
+
+		ready 'Удаляем пакет Пивас...'
+		opkg remove pivas --autoremove &> /dev/null 
+		when_ok 'УСПЕШНО'
+
+		ready 'Удаляем интегрированные в систему файлы...'
+		rm_package_files "${rm_type}" &> /dev/null && when_ok 'УСПЕШНО' || when_bad 'ОШИБКА'
+
+		ready 'Очищаем всевозможные сетевые правила...'
+		# т.к. файлы уже подчищены, то можем использовать лишь не "интеллектуальную" очистку
+		clear_previous_version_net_rules &> /dev/null
+		if [ $? = 0 ]; then when_ok 'УСПЕШНО'; else when_bad 'ОШИБКА'; fi
+
+		if [ -f /opt/etc/init.d/S99adguardhome ]; then
+			restore_adguard
+		fi
+
+		if [ -f /opt/etc/init.d/S56dnsmasq ] ; then
+			stop_dnsmasq
+		fi
+		if [ -f /opt/etc/init.d/S09dnscrypt-proxy2 ]; then
+			stop_crypt
+		fi
+		[ -x /opt/etc/init.d/S10dnscrypt-slot2 ] && /opt/etc/init.d/S10dnscrypt-slot2 stop >/dev/null 2>&1 || true
+		rm -f /opt/etc/dnscrypt-proxy-slot2.toml \
+			/opt/etc/dnsmasq.d/pivas-slot2-dns.dnsmasq \
+			/opt/etc/dnsmasq.d/pivas-slot2.servers \
+			/opt/etc/dnsmasq.d/pivas.servers \
+			/opt/tmp/pivas-slot2-dns.down /opt/tmp/pivas-slot1-dns.down \
+			/opt/sbin/dnscrypt-slot2 \
+			/opt/etc/init.d/S10dnscrypt-slot2 2>/dev/null
+		sed -i '/^servers-file=\/opt\/etc\/dnsmasq.d\/pivas/d; /^# ПИВАС: DNS slot-2/d; /^# ПИВАС: маршрут DNS/d; /^# ПИВАС: server= вынесен/d' /opt/etc/dnsmasq.conf 2>/dev/null
+
+		print_line
+		echo "Удаление ПИВАСа завершено."
+	fi
+}

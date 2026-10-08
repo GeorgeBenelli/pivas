@@ -1,0 +1,25 @@
+#!/bin/sh
+
+# All state writers share one lock; nested calls retain its owner token.
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py try-locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+
+# При подъёме Proxy21 / t2s21 возвращаем chain PIVAS_MARK + jump + ip rule +
+# default в table 1001. NDM отдаёт id=Proxy21, а system_name часто t2s21 —
+# старый хук смотрел только system_name=Proxy21 и никогда не срабатывал.
+
+[ -f /opt/etc/pivas.paused ] && exit 0
+
+case "${id:-} ${system_name:-} ${interface:-} ${ifname:-}" in
+    *Proxy21*|*t2s21*|*tsbr21*|*Pivas-proxy-vless*) ;;
+    *) exit 0 ;;
+esac
+
+[ "${connected:-}" = "yes" ] || [ "${link:-}" = "up" ] || [ "${up:-}" = "up" ] || [ "${up:-}" = "yes" ] || exit 0
+
+if [ -x /opt/etc/init.d/S95pivas-routes ]; then
+    /opt/etc/init.d/S95pivas-routes start >/dev/null 2>&1 &
+fi
+exit 0

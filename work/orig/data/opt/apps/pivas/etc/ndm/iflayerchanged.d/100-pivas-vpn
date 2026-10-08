@@ -1,0 +1,45 @@
+#!/bin/sh
+
+# All state writers share one lock; nested calls retain its owner token.
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py try-locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+
+# ------------------------------------------------------------------------------------------
+#
+# 	ПРОЕКТ ПИВАС
+#
+# ------------------------------------------------------------------------------------------
+# 	Данный файл служит основной библиотекой функций пакета ПИВАС
+# ------------------------------------------------------------------------------------------
+#	Дата: 18/01/2024
+#	Лицензия: Apache License 2.0
+# ------------------------------------------------------------------------------------------
+
+#	Подключаем библиотеку с функциями обработки ndm
+. /opt/apps/pivas/bin/libs/ndm_d
+
+cli_inface="$(inface_cli)"
+
+if [ "${1}" = "hook" ] && echo "${id}" | grep -q "${cli_inface}"; then
+
+	case "${layer}-${level}" in
+
+#		Запускаем обработку при поднятии соединения
+		"ctrl-running")
+			cmd_vpn_iptable_reset &> /dev/null
+#			link_up &> /dev/null
+			logger -t "ПИВАС"  "Соединение ${id} успешно подключено."
+		;;
+
+#		Запускаем обработку при отключении соединении
+		"ctrl-disabled" )
+			link_reboot "${cli_inface}" &> /dev/null
+			logger -t "ПИВАС"  "Соединение ${id} успешно завершено."
+		;;
+
+	esac
+
+fi
+

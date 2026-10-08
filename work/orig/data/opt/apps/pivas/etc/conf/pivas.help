@@ -1,0 +1,168 @@
+PIVAS custom fork: slot-1 / slot-2
+--------------------------------------------------------------------------------
+Выборочная маршрутизация доменов через Xray 26.3.27: VLESS TCP + Reality, gRPC + TLS, XHTTP + TLS/Reality или Hysteria 2.
+slot-1 - основной VLESS, slot-2 - альтернативный VLESS для бота и отдельных
+доменов. Per-device/clients удален из актуальной сборки.
+--------------------------------------------------------------------------------
+
+Основное:
+  help [word]                   показать эту справку, можно фильтровать по слову
+  status | state                статус xray/pivas/dnsmasq/web
+  info                          uptime, RAM, сервисы, слоты, число доменов
+  start | on | resume           включить pivas/xray, маршрут и перехват DNS
+  stop | off | pause            выключить VPN для сети и вернуть штатный DNS (xray живёт для бота/веба)
+  stop all                      то же + погасить xray (бот и пинг в веб-UI перестанут работать)
+
+  DNS (split): вне списков — DNS провайдера (штатный Keenetic), домены списка —
+  dnscrypt через VPN slot-1, домены slot-2 — dnscrypt через VPN slot-2.
+  Настройки в /opt/etc/pivas.conf: DNS_PROVIDER (пусто=авто), DNS_VPN_FAILURE=provider|closed
+  dns watchdog status           состояние DNS-цепочки (провайдер, slot-1, slot-2, авария)
+  rescue | restore-internet     аварийно вернуть штатный интернет Keenetic
+  web | web status              статус web UI и есть ли пароль
+  web pass <пароль>             задать пароль (логин всегда admin)
+  web on [пароль]               включить веб (пароль — если ещё нет)
+  web off | restart             выключить / перезапустить web UI
+  bot | tg                      Telegram-бот: статус, токен, id, on/off
+  bot token <TOKEN>             токен от @BotFather
+  bot id <CHAT_ID>              ваш числовой id (@userinfobot)
+  bot on | off | restart        запустить/остановить/перезапустить бота
+  2 | ext | extras | cheat      шпаргалка CLI ↔ Telegram-бот ↔ Web UI
+  ver | version                 версия пакета
+
+VLESS-слоты:
+  vless help                    подробная справка по VLESS-командам
+  vless show                    показать ссылки, серверы и списки slot-1/slot-2
+  vless ping                    проверить оба слота: exit-IP и latency
+  vless set '<vless://...>'     то же, что vless set-1
+  vless set-1 '<vless://...>'   заменить ссылку slot-1
+  vless set-2 '<vless://...>'   заменить ссылку slot-2
+  vless rollback                откатить весь /opt/etc/xray/pivas.json
+  vless rollback-1              откатить только outbound slot-1 из snapshot
+  vless rollback-2              откатить только outbound slot-2 из snapshot
+
+Домены по слотам:
+  vless 1-add <d> [d2 ...]      добавить домены в slot-1
+  vless 2-add <d> [d2 ...]      добавить домены в slot-2
+  vless 1-del <d> [d2 ...]      удалить домены из VPN-списка
+  vless 2-del <d> [d2 ...]      удалить домены из VPN-списка
+  vless 1-list                  домены, идущие через slot-1
+  vless 2-list                  домены, идущие через slot-2
+
+Общий список доменов:
+  show | list [word]            показать все VPN-домены, опционально фильтр
+  search | find <word>          то же, фильтр по подстроке
+  add | new <domain>            добавить домен в общий список (slot-1)
+  add <domain> -tag <tag>       добавить домен и пометить тегом
+  add tags                      добавить домены по выбранному тегу
+  del | rm <word>               удалить домены по подстроке
+  del tags                      удалить домены по выбранному тегу
+  clear | purge                 очистить общий список
+  clear force | clear yes       очистить без вопроса
+  clear ip                      удалить из списка только IP/диапазоны
+  import <file>                 импорт доменов из файла
+  export <file>                 экспорт доменов в файл
+
+Теги:
+  tags                          список тегов
+  tags <tag>                    домены указанного тега
+  tags list <tag>               домены указанного тега
+  tags add <tag> <domain>       пометить домен тегом
+  tags del <tag> <domain>       снять тег с домена
+
+Маршрутизация:
+  vpn                           текущий VPN/Proxy интерфейс
+  vpn set                       выбрать интерфейс
+  vpn reset                     пересобрать iptables и перезапустить сервисы
+  vpn rescan | vpn scan         пересканировать интерфейсы
+  vpn gateway <IP>              VPN-шлюз на отдельном LAN-устройстве
+  vpn net | vpn guest           список гостевых правил
+  vpn net add | vpn guest add   разрешить гостевой сети доступ к VPN
+  vpn net del | vpn guest del   убрать гостевой доступ
+  tunnel                        информация о подключениях
+  route                         сети и устройства, идущие в тоннель
+  route refresh                 пересоздать маршруты
+  reset | init                  полная пересборка pivas таблиц/ipset/services
+
+IPSet:
+  ipset                         список IP, идущих в тоннель
+  ipset <IP>                    диагностика конкретного IP
+  ipset add <IP>                добавить IP вручную
+  ipset clear | ipset flush     очистить PIVAS_LIST
+  ipset refill                  заполнить PIVAS_LIST статическими IP из списка
+
+DNS:
+  dns                           текущий DNS для пакета
+  dns test <domain>             проверить DNS
+  dns server IP:PORT            указать удаленный DNS в LAN
+  dns watchdog [status]         сторожок DNS: проверить и починить / показать состояние
+  dnsmasq                       состояние dnsmasq
+  dnsmasq port [N]              показать/сменить порт dnsmasq
+  dnsmasq ip [IP]               показать/сменить listen IP dnsmasq
+  dnsmasq on                    вернуть dnsmasq, выключив AdGuard mode
+  dnscrypt                      статус dnscrypt-proxy2
+  dnscrypt on | off             включить/выключить dnscrypt-proxy2
+
+Adblock / AdGuard:
+  adblock | ads                 статус adblock
+  adblock on | off              включить/выключить adblock
+  adblock add <domain>          исключить домен из блокировки
+  adblock del <domain>          вернуть домен в блокировку
+  adblock edit                  редактировать источники adblock
+  adguard                       статус AdGuard Home
+  adguard on | off              переключить DNS-связку на AdGuard/dnsmasq
+  adguard test                  проверить ipset правила AdGuard
+  adguard update                обновить AdGuard Home
+  adguard restart               перезапустить AdGuard Home
+
+Hosts:
+  hosts                         показать /opt/etc/hosts
+  hosts edit                    редактировать hosts вручную
+  hosts add <IP> <domain>       добавить запись
+  hosts del <IP|domain>         удалить запись
+  hosts prune                   очистить hosts
+
+Диагностика и логи:
+  test | check                  безопасная заглушка; старый тест отключен
+  test_old | check_old          старый upstream test, может быть неточным
+  debug [dns|iptables]          отладочный дамп
+  log [N]                       последние события PIVAS
+  log info [N]                  последние info-события PIVAS
+  log error [N]                 последние ошибки PIVAS
+  syslog [N]                    последние системные события
+  syslog info [N]               системные info-события
+  syslog error [N]              системные ошибки
+
+Установка и удаление:
+  setup                         первичная настройка, если пакет еще не настроен
+  uninstall                     удалить пакет, сохранив конфиги
+  uninstall yes | y | да        удалить без вопроса
+  uninstall full                удалить с зависимостями/дополнительной чисткой
+
+Отключено или удалено в custom-сборке:
+  update | upgrade              auto-update отключен, ставьте новый ipk/installer
+  rollback                      откат пакета отключен; VLESS: pivas vless rollback
+  freeze                        отключено; используйте pivas stop
+  unpause | unfreeze            отключено; используйте pivas start
+  clients                       per-device/clients удален из актуальной сборки
+  tags update                   отключено: upstream URL удален
+
+Примеры:
+  pivas status
+  pivas vless ping
+  pivas vless set-2 'vless://UUID@server:443?...'
+  pivas vless 2-add instagram.com cdninstagram.com
+  pivas vless 2-del instagram.com
+  pivas web pass мойпароль
+  pivas web on
+  pivas bot token 123456:AAF...
+  pivas bot id 123456789
+  pivas bot on
+  pivas rescue
+--------------------------------------------------------------------------------
+
+Устройства Keenetic:
+  pivas devices list                 список устройств и исключений
+  pivas devices exclude <MAC>        отключить перехват Pivas для устройства
+  pivas devices include <MAC>        вернуть устройство под правила Pivas
+
+  pivas vless swap                    поменять ссылки двух слотов местами

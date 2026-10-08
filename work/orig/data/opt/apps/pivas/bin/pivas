@@ -1,0 +1,971 @@
+#!/bin/sh
+
+case "${1:-}" in
+    vless) if [ "${2:-}" = swap ]; then shift 2; exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py swap-slots "$@"; fi ;;
+    devices) shift; exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py devices "$@" ;;
+    group) shift; exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py group "$@" ;;
+    slots) shift; exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py slots "$@" ;;
+    diag|diagnostics) exec /opt/bin/python3 /opt/apps/pivas/bin/main/diagnostics.py ;;
+    repair-dns) exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py dns-services ;;
+esac
+
+# All state writers share one lock; nested calls retain its owner token.
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+
+
+. /opt/apps/pivas/bin/libs/check
+. /opt/apps/pivas/bin/libs/hosts
+. /opt/apps/pivas/bin/libs/route
+. /opt/apps/pivas/bin/libs/tags
+. /opt/apps/pivas/bin/libs/update
+. /opt/apps/pivas/bin/libs/vless
+. /opt/apps/pivas/bin/libs/vpn
+. /opt/apps/pivas/bin/main/setup
+
+#------------------------------------------------------------------------------
+#
+#	ПАКЕТ ПИВАС
+#	файл ./pivas/bin/pivas -> /opt/bin/pivas
+#
+#------------------------------------------------------------------------------
+#
+#	Данный файл служит для запуска пакета ПИВАС из командной строки
+#	и содержит основные команды запуска пакета:
+#	Обработка получаемых аргументов скрипта
+#	$1 - команда для обработки
+#	$2 - аргумент для работы команды
+#
+# ------------------------------------------------------------------------------
+#	Дата создания: 21/05/2022
+#	Лицензия: Apache License 2.0
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------------------
+#
+#	Функция оторажения списка доменных имен и поиска доменного имени
+#	$1 - строка поиска
+# ------------------------------------------------------------------------------------------
+cmd_show_pivas_list(){
+
+	local domain_to_search="${1}"
+	if [ -z "${domain_to_search}" ] ; then
+		cmd_show_list
+	else
+		cmd_show_list | grep "${domain_to_search}" || {
+			echo -e "Доменное имя ${BLUE}${domain_to_search}${NOCL} в списке не обнаружено."
+		}
+	fi
+}
+
+cmd_restore_internet(){
+# ------------------------------------------------------------------------------------------
+#
+#	Аварийное восстановление обычного интернета Keenetic.
+#	Нужно на случай, когда Entware/pivas сломан или флешка вынута, а persistent
+#	opkg dns-override / Proxy-интерфейсы / policy routes остались в конфиге
+#	роутера и клиенты теряют DNS/маршрутизацию.
+# ------------------------------------------------------------------------------------------
+	print_line
+	echo "Аварийно возвращаю штатный интернет Keenetic..."
+
+	if command -v curl >/dev/null 2>&1; then
+		ready "Включаем обратно системный DNS Keenetic"
+		curl -s -m 5 -d '[{"opkg":{"no dns-override":true}},{"system":{"configuration":{"save":true}}}]' \
+			localhost:79/rci/ >/dev/null 2>&1 && when_ok "ОК" || when_bad "?"
+
+		ready "Удаляем принадлежащие Pivas Proxy21/Proxy22 из конфига Keenetic"
+		/opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py remove-proxy >/dev/null 2>&1 && when_ok "ОК" || when_bad "?"
+	fi
+
+	[ -x /opt/etc/init.d/S97pivas-clients ] && /opt/etc/init.d/S97pivas-clients stop >/dev/null 2>&1 || true
+	[ -x /opt/apps/pivas/bin/libs/clients-vpn ] && /opt/apps/pivas/bin/libs/clients-vpn flush >/dev/null 2>&1 || true
+	[ -x /opt/etc/init.d/S95pivas-routes ] && /opt/etc/init.d/S95pivas-routes stop >/dev/null 2>&1 || true
+	[ -x /opt/etc/init.d/S96pivas ] && /opt/etc/init.d/S96pivas stop >/dev/null 2>&1 || true
+	[ -x /opt/etc/init.d/S24xray ] && /opt/etc/init.d/S24xray stop >/dev/null 2>&1 || true
+	/opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py detach >/dev/null 2>&1 || true
+	if [ -f /opt/apps/pivas/bin/libs/ndm ]; then
+		. /opt/apps/pivas/bin/libs/ndm
+		ip4__chain__delete_jump nat PIVAS_DNS >/dev/null 2>&1 || true
+		ip4__chain__delete      nat PIVAS_DNS >/dev/null 2>&1 || true
+	fi
+
+	IPT=/opt/sbin/iptables
+	[ -x "$IPT" ] || IPT=iptables
+	for chain in PIVAS_CLIENTS PIVAS_MARK PIVAS_DNS; do
+		while "$IPT" -w -t mangle -D PREROUTING -j "$chain" >/dev/null 2>&1; do :; done
+		while "$IPT" -w -t nat -D PREROUTING -j "$chain" >/dev/null 2>&1; do :; done
+		"$IPT" -w -t mangle -F "$chain" >/dev/null 2>&1 || true
+		"$IPT" -w -t mangle -X "$chain" >/dev/null 2>&1 || true
+		"$IPT" -w -t nat -F "$chain" >/dev/null 2>&1 || true
+		"$IPT" -w -t nat -X "$chain" >/dev/null 2>&1 || true
+	done
+	while ip rule show 2>/dev/null | grep -q 'fwmark 0xd1000/0xd1000 lookup 1001'; do
+		ip rule del fwmark 0xd1000/0xd1000 lookup 1001 >/dev/null 2>&1 || break
+	done
+	ip route flush table 1001 >/dev/null 2>&1 || true
+
+	echo
+	echo "Готово. Если клиенты всё ещё без интернета: перезагрузите роутер из web-UI или командой reboot."
+	print_line
+}
+
+BOT_DIR=/opt/etc/telegram4pivas
+BOT_CFG=/opt/etc/telegram4pivas/telegram_bot_config.py
+BOT_INIT=/opt/etc/init.d/S98telegram4pivas
+
+pivas_bot_help() {
+	cat <<'EOF'
+Telegram-бот (telegram4pivas):
+  pivas bot status                 состояние и что уже задано
+  pivas bot token <TOKEN>          токен от @BotFather
+  pivas bot id <CHAT_ID> [...]     ваш id (число, не @username)
+  pivas bot on | start             запустить бота
+  pivas bot off | stop             остановить
+  pivas bot restart                перезапустить
+
+Токен: @BotFather → /newbot
+Свой id: @userinfobot или @getmyid_bot
+
+Пример:
+  pivas bot token 123456789:AAF...
+  pivas bot id 123456789
+  pivas bot on
+EOF
+}
+
+pivas_bot_ensure_cfg() {
+	[ -d "$BOT_DIR" ] || [ -f "$BOT_INIT" ] || {
+		error "telegram4pivas не установлен. Поставьте пакет telegram4pivas или pivas-full."
+		return 1
+	}
+	mkdir -p "$BOT_DIR" 2>/dev/null
+	if [ ! -f "$BOT_CFG" ]; then
+		cat > "$BOT_CFG" <<'TEMPLATE'
+token = 'insert:API'
+userid = []
+reconnection_timeout = 60
+reconnection_attempts = 5
+version = 'v1.3'
+# proxy_url = 'http://127.0.0.1:1098'
+TEMPLATE
+		chmod 600 "$BOT_CFG"
+	fi
+	return 0
+}
+
+pivas_bot_get_token() {
+	[ -f "$BOT_CFG" ] || { echo ""; return 0; }
+	awk -F"['\"]" '/^[[:space:]]*token[[:space:]]*=/{print $2; exit}' "$BOT_CFG"
+}
+
+pivas_bot_get_ids() {
+	[ -f "$BOT_CFG" ] || { echo ""; return 0; }
+	awk -F'[][]' '/^[[:space:]]*userid[[:space:]]*=/{print $2; exit}' "$BOT_CFG" | tr -d ' '
+}
+
+pivas_bot_token_ok() {
+	_t=$(pivas_bot_get_token)
+	case "$_t" in
+		''|insert:API|insert:API*) return 1 ;;
+		*:*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+pivas_bot_ids_ok() {
+	_ids=$(pivas_bot_get_ids)
+	[ -n "$_ids" ]
+}
+
+pivas_bot_running() {
+	ps w 2>/dev/null | grep -v grep | grep -q 'telegram_bot\.py'
+}
+
+pivas_bot_mask_token() {
+	awk -v t="$1" 'BEGIN{
+		n=length(t)
+		if (n>10) printf "%s…%s\n", substr(t,1,6), substr(t,n-3,4)
+		else print "задан"
+	}'
+}
+
+pivas_bot_show() {
+	pivas_bot_ensure_cfg || return 1
+	if pivas_bot_running; then
+		echo "бот:     запущен"
+	else
+		echo "бот:     остановлен"
+	fi
+	_t=$(pivas_bot_get_token)
+	if pivas_bot_token_ok; then
+		echo "токен:   $(pivas_bot_mask_token "$_t")"
+	else
+		echo "токен:   не задан  →  pivas bot token <от @BotFather>"
+	fi
+	_ids=$(pivas_bot_get_ids)
+	if [ -n "$_ids" ]; then
+		echo "id:      $_ids"
+	else
+		echo "id:      не задан  →  pivas bot id <число от @userinfobot>"
+	fi
+	if ! pivas_bot_token_ok || ! pivas_bot_ids_ok; then
+		echo
+		pivas_bot_help
+	fi
+}
+
+pivas_bot_set_token() {
+	local tok="$1"
+	[ -n "$tok" ] || { echo "Использование: pivas bot token <TOKEN>"; echo "Токен берётся у @BotFather командой /newbot"; return 1; }
+	pivas_bot_ensure_cfg || return 1
+	awk -v t="$tok" '
+		BEGIN { gsub(/\\/, "\\\\", t); gsub(/"/, "\\\"", t) }
+		/^[[:space:]]*token[[:space:]]*=/ { print "token = \"" t "\""; found=1; next }
+		{ print }
+		END { if (!found) print "token = \"" t "\"" }
+	' "$BOT_CFG" > "${BOT_CFG}.tmp" && mv "${BOT_CFG}.tmp" "$BOT_CFG"
+	chmod 600 "$BOT_CFG"
+	echo "Токен записан."
+	if pivas_bot_ids_ok; then
+		echo "Дальше: pivas bot on"
+	else
+		echo "Ещё нужен id: pivas bot id <число от @userinfobot>"
+	fi
+	if pivas_bot_running; then
+		echo "Бот уже работал — перезапускаю."
+		pivas_bot_restart
+	fi
+}
+
+pivas_bot_set_ids() {
+	[ $# -ge 1 ] || { echo "Использование: pivas bot id <CHAT_ID> [CHAT_ID2 ...]"; echo "Число берётся у @userinfobot, не @username."; return 1; }
+	pivas_bot_ensure_cfg || return 1
+	local ids="" id
+	for id in "$@"; do
+		id=$(printf '%s' "$id" | tr -d '[:space:]')
+		case "$id" in
+			''|*[!0-9-]*) echo "Не id: '$id' (нужно число, например 123456789)"; return 1 ;;
+		esac
+		[ -n "$ids" ] && ids="${ids}, "
+		ids="${ids}${id}"
+	done
+	awk -v i="$ids" '
+		/^[[:space:]]*userid[[:space:]]*=/ { print "userid = [" i "]"; found=1; next }
+		{ print }
+		END { if (!found) print "userid = [" i "]" }
+	' "$BOT_CFG" > "${BOT_CFG}.tmp" && mv "${BOT_CFG}.tmp" "$BOT_CFG"
+	chmod 600 "$BOT_CFG"
+	echo "id записан: $ids"
+	if pivas_bot_token_ok; then
+		echo "Дальше: pivas bot on"
+	else
+		echo "Ещё нужен токен: pivas bot token <от @BotFather>"
+	fi
+	if pivas_bot_running; then
+		echo "Бот уже работал — перезапускаю."
+		pivas_bot_restart
+	fi
+}
+
+pivas_bot_start() {
+	pivas_bot_ensure_cfg || return 1
+	[ -f "$BOT_INIT" ] || { error "нет $BOT_INIT"; return 1; }
+	pivas_bot_token_ok || { echo "Сначала: pivas bot token <от @BotFather>"; return 1; }
+	pivas_bot_ids_ok || { echo "Сначала: pivas bot id <число от @userinfobot>"; return 1; }
+	pidof xray >/dev/null 2>&1 || echo "Предупреждение: xray не запущен, бот ходит через slot-2 (:1098). Сделайте: pivas start"
+	"$BOT_INIT" start
+}
+
+pivas_bot_stop() {
+	[ -f "$BOT_INIT" ] || { echo "telegram4pivas не установлен"; return 0; }
+	"$BOT_INIT" stop
+}
+
+pivas_bot_restart() {
+	pivas_bot_ensure_cfg || return 1
+	[ -f "$BOT_INIT" ] || { error "telegram4pivas не установлен"; return 1; }
+	"$BOT_INIT" restart
+}
+
+pivas_bot_cmd() {
+	case "${1:-}" in
+		""|status|show|state) pivas_bot_show ;;
+		help|--help|-h)       pivas_bot_help ;;
+		token|tok)            pivas_bot_set_token "$2" ;;
+		id|ids|userid|chat|chatid)
+			shift
+			pivas_bot_set_ids "$@"
+			;;
+		on|start)             pivas_bot_start ;;
+		off|stop)             pivas_bot_stop ;;
+		restart|reload)       pivas_bot_restart ;;
+		*)
+			echo "Неизвестная команда: pivas bot ${1}"
+			pivas_bot_help
+			return 1
+			;;
+	esac
+}
+
+WEB_INIT=/opt/etc/init.d/S99pivas-web
+WEB_AUTH=/opt/etc/pivas-web/auth
+WEB_ENABLED=/opt/etc/pivas-web/enabled
+WEB_SETPASS=/opt/etc/pivas-web/setpass
+
+pivas_web_help() {
+	cat <<'EOF'
+Веб-панель pivas (порт 8888, логин admin):
+  pivas web status                 состояние и адрес
+  pivas web pass <пароль>          задать/сменить пароль
+  pivas web on [пароль]            включить (пароль — если ещё не задан)
+  pivas web off                    выключить
+  pivas web restart                перезапустить
+
+Пример:
+  pivas web pass мойпароль
+  pivas web on
+EOF
+}
+
+pivas_web_installed() {
+	[ -f "$WEB_INIT" ] || [ -x "$WEB_SETPASS" ]
+}
+
+pivas_web_has_auth() {
+	[ -s "$WEB_AUTH" ]
+}
+
+pivas_web_url() {
+	LAN_IP=$(ip -4 addr show br0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -1)
+	echo "http://${LAN_IP:-192.168.1.1}:8888/"
+}
+
+pivas_web_show() {
+	pivas_web_installed || { echo "pivas-web не установлен"; return 1; }
+	if [ -f "$WEB_INIT" ]; then
+		"$WEB_INIT" status 2>/dev/null || echo "pivas-web: остановлен"
+	fi
+	if [ -f "$WEB_ENABLED" ]; then
+		echo "автозапуск: включён"
+	else
+		echo "автозапуск: выключен"
+	fi
+	if pivas_web_has_auth; then
+		echo "пароль:  задан (логин admin)"
+	else
+		echo "пароль:  не задан  →  pivas web pass <пароль>"
+	fi
+	echo "адрес:   $(pivas_web_url)"
+	pivas_web_has_auth || { echo; pivas_web_help; }
+}
+
+pivas_web_setpass() {
+	local pwd="$1"
+	pivas_web_installed || { echo "pivas-web не установлен"; return 1; }
+	[ -x "$WEB_SETPASS" ] || { echo "нет $WEB_SETPASS"; return 1; }
+	[ -n "$pwd" ] || { echo "Использование: pivas web pass <пароль>"; echo "Логин всегда admin, минимум 4 символа."; return 1; }
+	"$WEB_SETPASS" "$pwd" || return 1
+	if ps w 2>/dev/null | grep -v grep | grep -q 'pivas-web/server.py'; then
+		echo "Веб уже работал — перезапускаю."
+		"$WEB_INIT" restart
+	else
+		echo "Дальше: pivas web on"
+	fi
+}
+
+pivas_web_start() {
+	pivas_web_installed || { echo "pivas-web не установлен"; return 1; }
+	if [ -n "$1" ]; then
+		pivas_web_setpass "$1" || return 1
+	fi
+	if ! pivas_web_has_auth; then
+		echo "Сначала задайте пароль: pivas web pass <пароль>"
+		echo "Или сразу: pivas web on <пароль>"
+		return 1
+	fi
+	[ -f "$WEB_INIT" ] || { echo "pivas-web не установлен"; return 1; }
+	mkdir -p /opt/etc/pivas-web || return 1
+	touch "$WEB_ENABLED" || return 1
+	"$WEB_INIT" start || { rm -f "$WEB_ENABLED"; return 1; }
+}
+
+pivas_web_cmd() {
+	case "${1:-}" in
+		""|status|show|state) pivas_web_show ;;
+		help|--help|-h)       pivas_web_help ;;
+		pass|password|passwd|setpass)
+			shift
+			pivas_web_setpass "$*"
+			;;
+		on|start)
+			shift
+			pivas_web_start "$*"
+			;;
+		off|stop)
+			rm -f "$WEB_ENABLED"
+			[ -f "$WEB_INIT" ] || { echo "pivas-web не установлен"; return 0; }
+			"$WEB_INIT" stop
+			;;
+		restart|reload)
+			pivas_web_has_auth || { echo "Сначала: pivas web pass <пароль>"; return 1; }
+			[ -f "$WEB_ENABLED" ] || { echo "Веб выключен; включить: pivas web on"; return 1; }
+			"$WEB_INIT" restart
+			;;
+		*)
+			echo "Неизвестная команда: pivas web ${1}"
+			pivas_web_help
+			return 1
+			;;
+	esac
+}
+
+# custom2: all DNS changes use pivas.conf + one validated apply.
+case "${1}:${2}" in
+    dns:apply) exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py apply ;;
+    dns:watchdog|dns:test|dnsmasq:status|dnsmasq:|dnscrypt:status|crypt:status) ;;
+    dns:*|dnsmasq:*|dnscrypt:*|crypt:*|adguard:*)
+        echo "Split DNS: настройте DNS_PROVIDER / DNS_STAMP_1 / DNS_STAMP_2 / DNS_VPN_FAILURE в /opt/etc/pivas.conf; затем pivas dns apply" >&2
+        exit 1 ;;
+esac
+
+# Сторожок DNS не требует завершённой настройки и не должен запускать её
+# (иначе `pivas dns watchdog status` из cron/скрипта уходит в интерактивный setup).
+if [ "${1}" = dns ] && [ "${2}" = watchdog ]; then
+	exec /opt/apps/pivas/bin/main/check_dns "${3}"
+fi
+
+# VLESS-слоты можно назначать до полного setup: иначе `pivas vless set`
+# уходит в интерактивный cmd_install и падает на шаблонном slot-2.
+if [ "${1}" = vless ] || [ "${1}" = bot ] || [ "${1}" = tg ] || [ "${1}" = telegram ] || [ "${1}" = web ]; then
+	:
+elif [ "${1}" = start ] || [ "${1}" = on ] || [ "${1}" = resume ] || [ "${1}" = setup ] || [ "${1}" = stop ] || [ "${1}" = off ] || [ "${1}" = pause ] || [ "${1}" = help ] || [ "${1}" = status ] || [ "${1}" = state ]; then
+    :
+elif echo "${1}" | grep -qvEi 'uninstall|rescue|restore-internet|internet-rescue' && [ -z "$(get_config_value SETUP_FINISHED)" ]; then
+    echo "Сначала задайте VLESS: pivas vless set-1 <ссылка>; затем pivas start" >&2
+    exit 1
+fi
+
+#clear_file_content "${PIVAS_LIST_FILE}"
+
+print_line
+case "${1}" in
+	setup)
+        touch "$PIVAS_PAUSE_FLAG"
+        /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py prepare || exit 1
+        /opt/apps/pivas/bin/main/dnscrypt_pin || exit 1
+        echo "Настройка подготовлена, VPN на паузе. Для включения: pivas start"
+        ;;
+
+	# Кастом: быстрая приостановка / возобновление pivas+xray (идемпотентно)
+	stop | off | pause)
+							print_line
+							[ -x /opt/etc/init.d/S97pivas-clients ] && /opt/etc/init.d/S97pivas-clients stop >/dev/null 2>&1 || true
+							[ -x /opt/apps/pivas/bin/libs/clients-vpn ] && /opt/apps/pivas/bin/libs/clients-vpn flush >/dev/null 2>&1 || true
+							[ -x /opt/etc/init.d/S10dnscrypt-slot2 ] && /opt/etc/init.d/S10dnscrypt-slot2 stop >/dev/null 2>&1 || true
+							touch "${PIVAS_PAUSE_FLAG}"
+                            /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py detach || exit 1
+                            rm -f /opt/tmp/pivas-web-state.json
+							[ -x /opt/etc/init.d/S95pivas-routes ] && /opt/etc/init.d/S95pivas-routes stop >/dev/null 2>&1 || true
+							# DNS: снимаем перехват PIVAS_DNS даже если xray уже не жив.
+							# Иначе клиенты остаются на dnscrypt (UK), хотя VPN выключен.
+							ready "Возвращаем штатный DNS Keenetic"
+							touch "${PIVAS_PAUSE_FLAG}"
+                            rm -f /opt/tmp/pivas-web-state.json
+							chmod -x "${DNS_LOCAL_DEMON_FILE}" 2>/dev/null || true
+							ip4__dns__delete_routing_for_home >/dev/null 2>&1 \
+								|| ip4__chain__delete_jump nat PIVAS_DNS >/dev/null 2>&1 \
+								|| true
+							if iptables -t nat -S PREROUTING 2>/dev/null | grep -q -- '-j PIVAS_DNS'; then
+								when_bad "?"
+							else
+								when_ok "ОК"
+							fi
+							# xray по умолчанию НЕ гасим: через его прокси (1097/1098) ходят
+							# telegram-бот и пинг в веб-UI, а api.telegram.org напрямую не доступен.
+							# Для сети VPN уже выключен — маркировка и DNS сняты выше.
+							# Полный останов вместе с xray: pivas stop all
+							if [ "${2:-}" = "all" ] || [ "${2:-}" = "full" ] || [ "${2:-}" = "xray" ]; then
+                                touch /opt/etc/pivas.xray-stopped
+								if pidof xray >/dev/null 2>&1; then
+									ready "Останавливаем xray"
+									/opt/etc/init.d/S24xray stop >/dev/null 2>&1 && when_ok "ОК" || when_bad "?"
+								fi
+								echo "VPN и xray выключены, DNS — штатный Keenetic. Для запуска: pivas start"
+							elif pidof xray >/dev/null 2>&1; then
+								echo "VPN выключен, DNS — штатный Keenetic. xray оставлен для бота/веба (pivas stop all — погасить и его)."
+								echo "Для запуска: pivas start"
+							else
+								echo "VPN выключен, DNS — штатный Keenetic. Для запуска: pivas start"
+							fi
+							print_line
+							;;
+	start | on | resume)
+        /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py dns-services || exit 1
+        touch "$PIVAS_PAUSE_FLAG"
+        /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py detach || exit 1
+        rm -f /opt/etc/pivas.xray-stopped
+        ip4__chain__delete_jump nat PIVAS_DNS >/dev/null 2>&1 || true
+        /opt/etc/init.d/S95pivas-routes stop >/dev/null 2>&1 || true
+        /opt/apps/pivas/bin/main/dnscrypt_pin || exit 1
+        /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py prepare || exit 1
+        /opt/etc/init.d/S24xray start || exit 1
+        ip4__ipset__create_list
+        ip4__ipset__fill_destination_excluded
+        /opt/etc/init.d/S56dnsmasq restart || exit 1
+        /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py native-dns || exit 1
+        /opt/apps/pivas/bin/main/ipset >/dev/null 2>&1
+        rm -f "$PIVAS_PAUSE_FLAG" /opt/tmp/pivas-dns-watchdog.bypass
+        if /opt/apps/pivas/bin/main/dnscrypt_pin && /opt/etc/init.d/S95pivas-routes start \
+            && ip4__dns__add_routing_for_home; then
+            chmod +x "$DNS_LOCAL_DEMON_FILE" 2>/dev/null || true
+            rm -f /opt/tmp/pivas-web-state.json
+            echo "VPN включён."
+        else
+            touch "$PIVAS_PAUSE_FLAG"
+            ip4__chain__delete_jump nat PIVAS_DNS >/dev/null 2>&1 || true
+            /opt/etc/init.d/S95pivas-routes stop >/dev/null 2>&1 || true
+            echo "VPN не включён: проверьте pivas dns watchdog status" >&2
+            exit 1
+        fi
+        ;;
+
+	rescue | restore-internet | internet-rescue)
+							cmd_restore_internet
+							;;
+
+	status | state)
+							print_line
+							pidof xray >/dev/null && echo "xray:       запущен ($(pidof xray | tr ' ' ',' | cut -d',' -f1))" || echo "xray:       ОСТАНОВЛЕН"
+							/opt/etc/init.d/S96pivas status 2>&1 | sed 's/^/pivas:       /'
+							/opt/etc/init.d/S56dnsmasq status 2>&1 | sed 's/^/dnsmasq:    /'
+							[ -f /opt/etc/init.d/S99pivas-web ] && /opt/etc/init.d/S99pivas-web status | sed 's/^/web:        /'
+							if [ -f /opt/etc/init.d/S98telegram4pivas ]; then
+								if ps w 2>/dev/null | grep -v grep | grep -q 'telegram_bot\.py'; then
+									echo "бот:        запущен"
+								else
+									echo "бот:        остановлен (pivas bot on)"
+								fi
+							fi
+							if [ -f "${PIVAS_PAUSE_FLAG}" ]; then
+								echo "DNS:        штатный Keenetic (пауза)"
+							elif iptables -t nat -S PREROUTING 2>/dev/null | grep -q -- '-j PIVAS_DNS'; then
+								if command -v dig >/dev/null 2>&1 && ! dig +time=2 +tries=1 +short @127.0.0.1 -p 9753 pivas-health.invalid A 2>/dev/null | grep -q '^[0-9]'; then
+									echo "DNS:        перехват pivas, но dnsmasq:9753 НЕ ОТВЕЧАЕТ (pivas dns watchdog status)"
+								else
+									_prov=$(grep -E '^server=[^/]' /opt/etc/dnsmasq.d/pivas.servers 2>/dev/null | cut -d= -f2 | tr '\n' ' ')
+									echo "DNS:        split — вне списков: провайдер (${_prov:-?}); slot-1 → dnscrypt:9153 via VPN; slot-2 → :9154 via VPN"
+								fi
+							elif [ -f /opt/tmp/pivas-dns-watchdog.bypass ]; then
+								echo "DNS:        АВАРИЯ — сторожок снял перехват, клиенты на штатном Keenetic (pivas dns watchdog status)"
+							else
+								echo "DNS:        штатный Keenetic"
+							fi
+							if [ ! -f "${PIVAS_PAUSE_FLAG}" ] && [ -f /opt/tmp/pivas-slot1-dns.down ]; then
+								echo "DNS slot-1: FALLBACK — dnscrypt:9153 не отвечает, политика $(get_config_value DNS_VPN_FAILURE) (pivas dns watchdog status)"
+							fi
+							if [ ! -f "${PIVAS_PAUSE_FLAG}" ] && [ -f /opt/tmp/pivas-slot2-dns.down ]; then
+								echo "DNS slot-2: FALLBACK — dnscrypt:9154 не отвечает, политики $(get_config_value DNS_SLOT2_FALLBACK) / $(get_config_value DNS_VPN_FAILURE)"
+							fi
+							if ip route show table 1001 2>/dev/null | grep -Eq '^default dev (t2s21|tsbr21)( |$)'; then
+								echo "маршрут:    table 1001 default ok"
+							elif [ -f "${PIVAS_PAUSE_FLAG}" ]; then
+								echo "маршрут:    table 1001 пуста (пауза — весь трафик напрямую)"
+							else
+								echo "маршрут:    table 1001 ПУСТА (сайты из списка не откроются)"
+							fi
+							[ -f "${PIVAS_PAUSE_FLAG}" ] && echo "пауза:      pivas stop (VPN и DNS выключены; включить: pivas start)"
+                            true
+							print_line
+							;;
+
+	# Сводная инфа: uptime, RAM, сервисы, слоты, кол-во доменов.
+	info)
+							up=$(awk '{print int($1)}' /proc/uptime)
+							d=$((up/86400)); h=$(((up%86400)/3600)); m=$(((up%3600)/60))
+							if [ "$d" -gt 0 ]; then UP="${d} дн. ${h} ч."; else UP="${h} ч. ${m} мин."; fi
+							mt=$(awk '/MemTotal/  {print int($2/1024)}' /proc/meminfo)
+							mf=$(awk '/MemAvailable/ {print int($2/1024); exit}' /proc/meminfo)
+							[ -z "$mf" ] && mf=$(awk '/MemFree/ {print int($2/1024); exit}' /proc/meminfo)
+							mu=$((mt - mf))
+							echo "  Uptime:    $UP"
+							echo "  Память:    ${mu} / ${mt} МБ (свободно ${mf})"
+							echo "  Нагрузка:  $(awk '{print $1}' /proc/loadavg)"
+							echo ""
+							if pidof xray >/dev/null; then
+								echo "  xray:      ✓ работает (pid $(pidof xray | tr ' ' ',' | cut -d',' -f1))"
+							else
+								echo "  xray:      ✗ остановлен"
+							fi
+							if pidof dnsmasq >/dev/null; then
+								echo "  dnsmasq:   ✓ работает"
+							else
+								echo "  dnsmasq:   ✗ остановлен"
+							fi
+							if [ -f /opt/etc/init.d/S99pivas-web ]; then
+								if pgrep -f pivas-web/server.py >/dev/null; then
+									LAN_IP=$(ip -4 addr show br0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -1)
+									echo "  pivas-web:  ✓ работает → http://${LAN_IP:-192.168.1.1}:8888/"
+								else
+									echo "  pivas-web:  ✗ остановлен (pivas web on — включить)"
+								fi
+							else
+								echo "  pivas-web:  не установлен"
+							fi
+							echo ""
+							if [ -f /opt/etc/xray/pivas.json ] && command -v jq >/dev/null 2>&1; then
+								s1=$(jq -r '.outbounds[]|select(.tag=="slot-1")|(.settings.vnext[0].address+":"+(.settings.vnext[0].port|tostring))' /opt/etc/xray/pivas.json 2>/dev/null)
+								s2=$(jq -r '.outbounds[]|select(.tag=="slot-2")|(.settings.vnext[0].address+":"+(.settings.vnext[0].port|tostring))' /opt/etc/xray/pivas.json 2>/dev/null)
+								[ "$s1" = "null:null" ] && s1="не настроен"
+								[ "$s2" = "null:null" ] && s2="не настроен"
+								n1=$(grep -cv '^$' /opt/etc/pivas.list 2>/dev/null)
+								n2=$(grep -cv '^$' /opt/etc/pivas-slot2.list 2>/dev/null)
+								# для slot-1 вычитаем slot-2 (они хранятся в общем pivas.list)
+								n1=$((n1 - n2))
+								[ "$n1" -lt 0 ] && n1=0
+								echo "  Slot-1:    $s1  ·  ${n1} доменов"
+								echo "  Slot-2:    $s2  ·  ${n2} доменов"
+							else
+								echo "  Слоты:     нет pivas.json или jq не найден"
+							fi
+							;;
+
+	# Шпаргалка по НАШИМ расширенным командам + соответствие кнопкам бота.
+	# Оригинальный 'pivas help' не трогается — там upstream команды.
+	2 | ext | extras | cheat | hlp)
+							cat <<'CHEAT'
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Шпаргалка: CLI ↔ Telegram-бот ↔ Web UI
+  Для upstream-команд: pivas help
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ─── VLESS слоты ──────────────────────────────
+pivas vless set-1 'vless://...'          # бот: «Заменить VLESS-1»
+pivas vless set-2 'vless://...'          # бот: «Заменить VLESS-2»
+pivas vless show                         # бот: «Показать VLESS»
+pivas vless rollback                     # бот: «Откат VLESS»
+pivas vless rollback-1                   # откат только slot-1
+pivas vless rollback-2                   # откат только slot-2
+
+# ─── Домены по слотам ─────────────────────────
+pivas vless 1-add youtube.com claude.ai  # бот: «Slot-1: +домен»
+pivas vless 1-del youtube.com            # бот: «Slot-1: -домен»
+pivas vless 1-list                       # бот: «Slot-1: список»
+pivas vless 2-add kino.pub               # бот: «Slot-2: +домен»
+pivas vless 2-del kino.pub
+pivas vless 2-list
+pivas vless ping                         # живы ли slot-1/slot-2 (exit-IP + ms)
+pivas vless help                         # шпаргалка vless
+
+# ─── Все домены (upstream) ────────────────────
+pivas list                               # бот: «Все домены»
+pivas clear                              # бот: «Очистить список»
+pivas import <file>                      # бот: «Импорт»
+pivas export <file>                      # бот: «Экспорт»
+
+# ─── Служба pivas ──────────────────────────────
+pivas info                               # сводка uptime/RAM/xray/slots
+pivas on    / pivas off                   # VPN-тумблер в web UI / бот
+pivas start / pivas stop                  # бот: «Запустить/Остановить pivas»
+pivas repair-dns                          # проверить и восстановить скрипты DNS-служб
+pivas status                             # состояние iptables/ipset/xray
+pivas test                               # бот: «Запустить test»
+pivas debug                              # бот: «Запустить debug»
+pivas reset                              # бот: «Запустить reset»
+
+# ─── Web UI (панель на http://<LAN-IP>:8888) ──
+pivas web pass <пароль>                  # задать пароль (логин admin)
+pivas web on                             # включить веб-панель
+pivas web off                            # выключить
+pivas web status                         # жив ли процесс + адрес
+pivas web restart                        # перезапустить (если завис)
+
+# ─── Telegram-бот ─────────────────────────────
+pivas bot token <от @BotFather>          # записать токен
+pivas bot id <число от @userinfobot>     # записать chat id
+pivas bot on                             # запустить
+pivas bot off                            # остановить
+pivas bot status                         # что задано и жив ли процесс
+pivas bot restart
+/opt/etc/init.d/S99pivas-web start       # запускает только после pivas web on
+/opt/etc/init.d/S99pivas-web stop
+/opt/etc/init.d/S99pivas-web restart
+/opt/etc/pivas-web/setpass <пароль>      # задать/сменить пароль (admin)
+tail -f /tmp/log/pivas-web.log           # access-лог сервера
+cat /opt/etc/telegram4pivas/.flavor      # web | noweb (версия бота)
+
+# ─── Остальное ────────────────────────────────
+reboot                                  # бот: «Перезагрузить роутер»
+opkg install /tmp/*.ipk                 # бот: «Обновить пакет»
+tail -f /opt/etc/telegram4pivas/telegram4pivas_log.txt   # бот: «Запросить лог»
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Вызвать эту шпаргалку: pivas 2  /  pivas ext  /  pivas extras  /  pivas cheat
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHEAT
+							;;
+
+	# Web-UI управление (pivas-web ipk)
+	web)
+							shift
+							pivas_web_cmd "$@"
+							;;
+
+	bot | tg | telegram)
+							shift
+							pivas_bot_cmd "$@"
+							;;
+
+	# Работа со списком
+
+	show | list | search | find)
+							cmd_show_pivas_list "${2}"
+		;;
+	purge | clear)			cmd_clear_list "${2}"
+		;;
+
+	import)					cmd_import_hosts "${2}"
+		;;
+	export)					cmd_export_hosts "${2}"
+		;;
+
+	add | new)				cmd_add_one_host "${2}" "yes" "${3}"
+		;;
+	del | rm  )				cmd_del_one_host "${2}"
+		;;
+
+		tags)
+			case "${2}" in
+				list) 			cmd_show_tags_domain_list "${3}" ;;
+				add)			cmd_add_domain_to_tag_list "${3}" "${4}" ;;
+				del)			cmd_del_domain_from_tag_list "${3}" "${4}" ;;
+				update)			echo "Обновление тегов с GitHub отключено в custom-сборке. Правьте /opt/apps/pivas/etc/conf/tags.list вручную."; exit 1 ;;
+				*) 				cmd_show_tags_domain_list "${2}" ;;
+			esac
+			;;
+
+	# Расширенные настройки
+
+	# Тоннели
+
+	vless)
+		case "${2}" in
+			new) 	rm -f "${VLESS_CONFIG_FILE}"
+					start_vless "$(cat ${INFACE_NAMES_FILE} | grep vless | cut -d'|' -f2)"
+				;;
+			# Установка ссылок в слоты. По умолчанию slot-1 — основной трафик,
+			# slot-2 — бот и перечисленные в pivas vless 2-list домены.
+			set|set-1)  pivas_vless_set 1 "${3}" ;;
+			set-2)      pivas_vless_set 2 "${3}" ;;
+			show)       pivas_vless_show ;;
+			rollback)       pivas_vless_rollback ;;
+			rollback-1)     pivas_vless_rollback_slot 1 ;;
+			rollback-2)     pivas_vless_rollback_slot 2 ;;
+
+			1-add)      shift 2; pivas_vless_slot_add 1 "$@" ;;
+			1-del)      shift 2; pivas_vless_slot_del 1 "$@" ;;
+			1-list)     pivas_vless_slot_list 1 ;;
+
+			2-add)      shift 2; pivas_vless_slot_add 2 "$@" ;;
+			2-del)      shift 2; pivas_vless_slot_del 2 "$@" ;;
+			2-list)     pivas_vless_slot_list 2 ;;
+
+			ping)       pivas_vless_ping ;;
+
+			""|help|--help|-h) pivas_vless_help ;;
+
+			# Старое поведение (установка пакета proxy). Оставляем только для
+			# явной команды "install", не как fallback для опечаток.
+			install)    cmd_install_proxy_package ;;
+
+				*)          echo "Неизвестная подкоманда: pivas vless ${2}"
+							echo "Смотрите: pivas vless help"
+							exit 1
+							;;
+			esac
+				;;
+
+	ssr)
+		case "${2}" in
+			new)			cmd_shadowsocks_read_new_data ;;
+			port) 			cmd_shadowsocks_local_port_change "${3}" ;;
+			reset) 			cmd_shadowsocks_iptable_reset && all_services_restart;;
+			status | *) 	cmd_vpn_status ;;
+		esac
+		;;
+
+	vpn)
+		case "${2}" in
+			set) 			cmd_interface_change no && update_iptables ;;
+			gateway) 		cmd_manual_gateway_set "${3}" ;;
+			reset) 			update_iptables && all_services_restart ;;
+			net | guest)
+				case "${3}" in
+					add ) 			cmd_bridge_vpn_access_add && cmd_vpn_iptable_reset &> /dev/null;;
+					del ) 			cmd_bridge_vpn_access_del && cmd_vpn_iptable_reset &> /dev/null;;
+					*) 				cmd_bridge_vpn_access_list ;;
+				esac
+				;;
+
+			rescan | scan)	cmd_scan_interface_list ;;
+			status | *) 	cmd_vpn_status ;;
+		esac
+		;;
+
+	# DNS
+
+	dns)
+		case "${2}" in
+			server) 		dns_server_install_remotely "${3}" ;;
+			test) 			cmd_dns_test "${3}";;
+			watchdog)		# сторожок DNS: без аргумента - проверить и починить, status - показать
+							/opt/apps/pivas/bin/main/check_dns "${3}" ;;
+			*) 				cmd_dnsmasq_dns_change "${2}" ;;
+		esac
+		;;
+
+	dnsmasq)
+		case "${2}" in
+			port) 			cmd_dnsmasq_port_change "${3}" ;;
+			ip) 			cmd_dnsmasq_dns_change "${3}";;
+			on)				cmd_adguardhome_off ;;
+			status | *) 	exit_when_adguard_on status;
+							[ "${status}" = 0 ] && {
+								cmd_dnsmasq_listen_show;
+							} ;;
+		esac
+		;;
+
+	crypt | dnscrypt)
+		case "${2}" in
+			on) 			cmd_dns_crypt_on ;;
+			off) 			cmd_dns_crypt_off ;;
+			status | *) 	cmd_dns_crypt_status_show ;;
+		esac
+		;;
+
+	adblock | ads)
+		case "${2}" in
+			on) 			cmd_ads_protect_on ask;;
+			off) 			cmd_ads_protect_off ;;
+			edit) 			cmd_ads_edit ;;
+			add)			cmd_ads_add_host "${3}" ;;
+			del)			cmd_ads_del_from_skip_list "${3}" ;;
+			status | *) 	cmd_ads_status ;;
+		esac
+		;;
+
+	adguard)
+		case "${2}" in
+			on) 			cmd_adguardhome_on ;;
+			off) 			cmd_adguardhome_off ;;
+			test)			cmd_adguard_check ;;
+			update)			cmd_adguard_update ;;
+			restart)		/opt/etc/init.d/S99adguardhome restart
+				exit 0
+				;;
+			*) 				cmd_adguardhome_status ;;
+		esac
+		;;
+
+	hosts)
+		case "${2}" in
+			add ) 			cmd_hosts_one_add "${3}" "${4}" ;;
+			del ) 			cmd_hosts_one_del "${3}";;
+			prune ) 		cmd_hosts_prune ;;
+			edit ) 			cmd_hosts_edit ;;
+			*) 				cmd_hosts_list ;;
+		esac
+		;;
+
+	# Маршрутизация
+
+	tunnel)
+		cmd_tunnel
+	;;
+	route)
+		case "${2}" in
+			refresh | recreate) cmd_route_refresh ;;
+			*)                  cmd_route         ;;
+		esac
+		;;
+
+	# Поиск и устранение неисправностей
+
+	log)
+		case "${2}" in
+			error | err) syslog__show "${2}" 'ПИВАС' 'Ошибки Пиваса:'                   "${3}" ;;
+			info)        syslog__show "${2}" 'ПИВАС' 'Информационные сообщения Пиваса:' "${3}" ;;
+			*)           syslog__show ''     'ПИВАС' 'События Пиваса:'                  "${2}" ;;
+		esac
+	;;
+	syslog)
+		case "${2}" in
+			error | err) syslog__show "${2}" '!ПИВАС' 'Ошибки системы:'                   "${3}" ;;
+			info)        syslog__show "${2}" '!ПИВАС' 'Информационные сообщения системы:' "${3}" ;;
+			*)           syslog__show ''     '!ПИВАС' 'События системы:'                  "${2}" ;;
+		esac
+	;;
+
+	ipset)
+		case "${2}" in
+			add)           cmd_ipset_add "${3}" ;;
+			clear | flush) cmd_ipset_flush      ;;
+			refill)        cmd_ipset_refill     ;;
+			*)             cmd_ipset "${2}"     ;;
+		esac
+		;;
+
+	debug)
+		case "${2}" in
+			dns)      cmd_debug_dns          ;;
+			iptables) cmd_debug_iptables     ;;
+			*)        cmd_print_debug "${2}" ;;
+		esac
+		;;
+
+	test | check) cmd_test_warning
+	;;
+	test_old | check_old) cmd_state_checker "${2}"
+	                      [ -n "${2}" ] && exit 0
+	;;
+
+	reset | init)	        cmd_pivas_init
+		;;
+
+	# Управление пакетом
+
+	# Обновление
+
+	version | ver)			version
+		;;
+		upgrade | update)		echo "Auto-update отключён в custom-сборке. Обновляйте через install-pivas*.sh или opkg install --force-reinstall <ipk>."; exit 1
+			;;
+		rollback)				echo "Откат пакета отключён. Для VLESS используйте: pivas vless rollback"; exit 1
+			;;
+		clients)				echo "Команда clients удалена из актуальной custom-сборки."; exit 1
+			;;
+
+		# Отключение и удаление
+
+	freeze)                 echo "Команда freeze отключена. Используйте: pivas stop"; exit 1 ;;
+	unpause|unfreeze)       echo "Команда unpause/unfreeze отключена. Используйте: pivas start"; exit 1 ;;
+
+	uninstall ) 			cmd_uninstall  "${2}" "${3}"
+		;;
+
+	# Команды
+
+	help|-h|--h ) 			[ -n "${2}" ] && cmd_help | grep "${2}" || cmd_help
+		;;
+	*)						error "Команда '${1}' не известна, список доступных команд:"
+							print_line
+							cmd_help
+		;;
+esac
+
+command_status=$?
+print_line
+exit "$command_status"

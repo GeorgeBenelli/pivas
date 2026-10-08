@@ -1,0 +1,34 @@
+#!/bin/sh
+
+# All state writers share one lock; nested calls retain its owner token.
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py try-locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+
+
+
+#------------------------------------------------------------------------------
+#
+#	ПАКЕТ ПИВАС
+#
+#------------------------------------------------------------------------------
+#
+#	Данный файл служит для создания правил для пропуска Shadowsocks трафика (tcp)
+#	при использовании любого shadowsocks подключения.
+#	Они срабатывают при перезаписи правил в таблице netfilter
+#	https://github.com/ndmsystems/packages/wiki/Opkg-Component
+#
+# ------------------------------------------------------------------------------
+#	Дата создания: 21/05/2022
+#	Лицензия: Apache License 2.0
+# ------------------------------------------------------------------------------
+
+# IPv4
+# Роутинг прокси и DNS в nat
+# В идеале UDP унести в mangle, но этого пока не сделано
+if [ "${type}" = 'iptables' ] && [ "${table}" = 'nat' ] ; then
+	. /opt/apps/pivas/bin/libs/ndm
+
+	ip4_firewall_set_all_rules &>/dev/null
+fi

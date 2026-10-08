@@ -1,0 +1,39 @@
+# Generated packages and local publication output
+/dist/
+/release-assets/
+/github-ready/
+/publication/
+/vendor/xray/mipsel-3.4
+/vendor/xray/aarch64-3.10
+/vendor/quic-probe/mipsel-3.4
+/vendor/quic-probe/aarch64-3.10
+# Secrets, router state and personal artifacts
+.env
+.env.*
+!.env.example
+**/telegram_bot_config.py
+**/auth.json
+**/sessions.json
+**/pivas.json
+**/pivas-groups.json
+**/pivas-devices.json
+/backups/
+*.pem
+*.key
+*.p12
+*.ipk
+*.log
+*.img
+*.tgz
+# Development
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+/test-results/
+/playwright-report/
+/docs/ui-*.png
+.DS_Store
+._*
+.idea/
+.vscode/

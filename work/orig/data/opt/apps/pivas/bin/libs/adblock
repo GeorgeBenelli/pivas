@@ -1,0 +1,268 @@
+#!/bin/sh
+#------------------------------------------------------------------------------
+#	ПАКЕТ ПИВАС
+#------------------------------------------------------------------------------
+#
+#	Данный файл содержит функции для обработки списков блокировки рекламы
+#
+# ------------------------------------------------------------------------------
+#	Дата создания: 05/11/2022
+#	Лицензия: Apache License 2.0
+# ------------------------------------------------------------------------------------------
+
+. /opt/apps/pivas/bin/libs/main
+FLASHED_HOST_FILE=$(echo "${ADBLOCK_HOSTS_FILE}" | sed 's/\//\\\//g')
+# ------------------------------------------------------------------------------------------
+#
+#	 Редактируем файл источников блокировки рекламы и нежелательных сайтов
+#
+# ------------------------------------------------------------------------------------------
+cmd_ads_edit() {
+	exit_when_adguard_on status; [ "${status}" = 0 ] && {
+		nano "${ADBLOCK_SOURCES_LIST}" &&
+			{
+				cmd_ads_protect_on ask
+			}
+	}
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Отключаем работу блока борьбы с рекламой
+#
+# ------------------------------------------------------------------------------------------
+cmd_ads_protect_off() {
+	exit_when_adguard_on status; [ "${status}" = 0 ] && {
+#		if ! [ -f "${ADS_MAIN_SCRIPT}" ]; then
+#			cp -f '/opt/apps/pivas/bin/main/adblock' '/opt/apps/pivas/bin/main/adblock'
+#			chmod +x '/opt/apps/pivas/bin/main/adblock'
+#		fi
+		ready "Блокировка рекламы"
+
+		sed -i '/addn-hosts='"${FLASHED_HOST_FILE}"'/d' "${DNSMASQ_CONFIG}"
+		OFF="ПОДКЛЮЧЕНА.\nПроизошла не предвиденная ошибка."
+		[ $? = 0 ] && when_ok "ОТКЛЮЧЕНА" || when_bad "${OFF}"
+		ready "Перезапуск службы dnsmasq"
+		/opt/etc/init.d/S56dnsmasq restart &> /dev/null
+		[ $? = 0 ] && when_ok "ГОТОВО" || when_bad "ОШИБКА"
+	}
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Включаем работу блока борьбы с рекламой
+#	$1 - задаем вопросы (ask)  или отвечаем на все да (yes)
+#
+# ------------------------------------------------------------------------------------------
+cmd_ads_protect_on() {
+	exit_when_adguard_on status; [ "${status}" = 0 ] && {
+		perform_to_aks="${1}"
+#		if ! [ -f '/opt/apps/pivas/bin/main/adblock' ]; then
+#			cp -f '/opt/apps/pivas/bin/main/adblock' '/opt/apps/pivas/bin/main/adblock'
+#			chmod +x '/opt/apps/pivas/bin/main/adblock'
+#		fi
+
+		if cat < '/opt/etc/dnsmasq.conf' | sed 's/^\(.*\)\(#.*\)/\2/; /^#/d; /^$/d' | grep -q "${ADBLOCK_HOSTS_FILE}" ; then
+			ready "Блокировка рекламы уже "
+			when_ok "ВКЛЮЧЕНА"
+		else
+			ready "Блокировка рекламы"
+			sed -i '/addn-hosts='"${FLASHED_HOST_FILE}"'/d' "${DNSMASQ_CONFIG}"
+#			sed -i 's/\(^ADS_BLOCKER_ON=.*\)/\11/' '/opt/apps/pivas/bin/main/update'
+			echo "addn-hosts=${ADBLOCK_HOSTS_FILE}" >> '/opt/etc/dnsmasq.conf'
+			OFF="ОТКЛЮЧЕНА.\nПроизошла непредвиденная ошибка."
+			[ $? = 0 ] && when_ok "ВКЛЮЧЕНА" || when_bad "${OFF}"
+			ads_request_to_upload "${perform_to_aks}"
+		fi
+		print_line
+		ready "Перезапуск службы dnsmasq"
+		/opt/etc/init.d/S56dnsmasq restart &> /dev/null
+		[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+	}
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Выводим статус блока борьбы с рекламой
+#
+# ------------------------------------------------------------------------------------------
+cmd_ads_status() {
+	if [ -f "${ADS_MAIN_SCRIPT}" ]; then
+		ready "Блокировка рекламы "
+		if [ -f '/opt/etc/init.d/S56dnsmasq' ]; then
+			cat < '/opt/etc/dnsmasq.conf' | sed 's/^\(.*\)\(#.*\)/\2/; /^#/d; /^$/d' | grep -q "${ADBLOCK_HOSTS_FILE}" &> /dev/null
+			[ $? = 0 ] && when_ok "ВКЛЮЧЕНА" || when_bad "ОТКЛЮЧЕНА"
+		else
+			when_bad "ОТКЛЮЧЕНА"
+			warning "Отсутствует файл конфигурации /opt/etc/dnsmasq.conf"
+		fi
+	else
+		error 'Скрипт обработки рекламы отсутствует'
+		error 'Переустановите пакет ПИВАС заново!'
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Выводим статус блока борьбы с рекламой
+#	 $1 - значение ask - спрашивать о восстановлении
+#	 архивный файл с источниками обновления рекламы в случае его обнаружения
+#
+# ------------------------------------------------------------------------------------------
+ads_request_to_upload() {
+
+	answer="${1}"
+	sources_name_file=adblock.sources
+	if ! [ -f "${ADBLOCK_SOURCES_LIST}" ]; then
+	# 	ready "Загрузка источников рекламы по умолчанию"
+	# 	cp -f "/opt/apps/pivas/etc/conf/${sources_name_file}" "${ADBLOCK_SOURCES_LIST}"
+	# 	[ $? = 0 ] && when_ok "УДАЧНО" || when_bad "С ОШИБКОЙ"
+	# else
+		if [ -f "${ADBLOCK_SOURCES_LIST_BACKUP}" ]; then
+			warning "Обнаружен архивный файл с источниками обновления рекламы."
+			[ "${answer}" = ask ] && read_ynq_timer "Восстановить данный файл" answer Y 12
+			if [ "${answer}" = q ] ; then exit_q; print_line; exit 1; fi
+			if echo "${answer}" | grep -qi y ; then
+				ready "Восстановление архива с источниками рекламы завершено"
+				mv -f "${ADBLOCK_SOURCES_LIST_BACKUP}" "${ADBLOCK_SOURCES_LIST}"
+				[ $? = 0 ] && when_ok "УДАЧНО" || when_bad "С ОШИБКОЙ"
+			else
+				ready "Загрузка источников рекламы по умолчанию"
+				cp -f "/opt/apps/pivas/etc/conf/${sources_name_file}" "${ADBLOCK_SOURCES_LIST}"
+				[ $? = 0 ] && when_ok "УДАЧНО" || when_bad "С ОШИБКОЙ"
+			fi
+		else
+			mkdir -p "$(echo "${ADBLOCK_SOURCES_LIST}" | sed 's/^\(.*\)\/.*.list/\1/')"
+			cp -f /opt/apps/pivas/etc/conf/adblock.sources "${ADBLOCK_SOURCES_LIST}"
+		fi
+	fi
+	if [ -f "${ADBLOCK_HOSTS_FILE}" ]; then
+		[ "${answer}" = ask ] && read_ynq_timer "Обновить списки блокировки рекламы" answer N 6
+		if [ "${answer}" = q ] ; then exit_q; print_line; exit 1; fi
+		echo "${answer}" | grep -qi y && /opt/apps/pivas/bin/main/adblock
+	else
+		/opt/apps/pivas/bin/main/adblock
+	fi
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем белый список с разделенный |
+#
+# ------------------------------------------------------------------------------------------
+get_separated_host_list() {
+	list_file="${1}"
+	clear_file_content "${list_file}"
+	exclude_com=".*.$(cat < "${list_file}" | tr -d '*' | sed ':a;N;$!ba;s/\n/$|.*./g')$"
+	echo "${exclude_com}"
+}
+
+
+#--------------------------------------------------------------
+#
+# 	Перегружаем необходимые сервисы для работы блокировки рекламы.
+#
+#--------------------------------------------------------------
+restart_dns_service(){
+
+	ready "${prefix}Перезапускаем сервис dnsmasq"
+	/opt/etc/init.d/S56dnsmasq restart &>/dev/null
+	[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+}
+
+#--------------------------------------------------------------
+#
+# 	Удаляем доменное имя из списка блокировки рекламы.
+#
+#--------------------------------------------------------------
+cmd_ads_add_host(){
+
+	exit_when_adguard_on status; [ "${status}" = 0 ] && {
+		host=${1//\*/}
+	#	Проверяем есть ли сам файл для исключений и есть ли в нем записи.
+		[ -f "${ADBLOCK_LIST_EXCEPTION}" ] || touch "${ADBLOCK_LIST_EXCEPTION}"
+	#	Проверяем есть ли уже в списке переданный домен
+		if cat < "${ADBLOCK_LIST_EXCEPTION}" | grep -q "${host}" ; then
+			warning "Данный домен уже был ранее удален из списка блокировки рекламы."
+		else
+			echo "${host}" >> "${ADBLOCK_LIST_EXCEPTION}"
+			nlines_amount=$(cat < "${ADBLOCK_HOSTS_FILE}" | wc -l)
+			ready "Доменное имя ${host} удалено из списка блокировки рекламы"
+			exclude_all="$(get_separated_host_list "${ADBLOCK_LIST_EXCEPTION}")"
+			sed -i "/.*.${host}$/d" "${ADBLOCK_HOSTS_FILE}" && \
+			when_ok "УСПЕШНО" || when_bad "С ОШИБКОЙ"
+			nlines_excluded=$(cat < "${ADBLOCK_HOSTS_FILE}" | wc -l)
+			diff_count=$((nlines_amount-nlines_excluded))
+			ready "Всего из списка блокировки рекламы удалено хостов"
+			when_ok "${diff_count}"
+			restart_dns_service
+		fi
+	}
+}
+
+#--------------------------------------------------------------
+#
+# 	Удаляем доменное имя из списка исключений.
+#
+#--------------------------------------------------------------
+cmd_ads_del_from_skip_list(){
+	exit_when_adguard_on status; [ "${status}" = 0 ] && {
+		host=${1//\*/}
+
+		if [ -f "${ADBLOCK_LIST_EXCEPTION}" ] ; then
+			ready "Доменное имя ${host} удалено из списка исключений"
+			sed -i "/.*${host}$/d" "${ADBLOCK_HOSTS_FILE}" && when_ok "УСПЕШНО" || when_bad "С ОШИБКОЙ"
+			restart_dns_service
+		else
+			warning "Списка исключений еще не существует. "
+			warning "Добавьте в него домен командой 'pivas adblock add <host>'"
+		fi
+	}
+}
+
+
+#--------------------------------------------------------------
+#
+# 	Удаляем все доменные имена, которые у нас имеются
+# 	в защищенный список(белый список)
+#
+#--------------------------------------------------------------
+ads_remove_white_hosts(){
+
+	if [ -f "${PIVAS_LIST_FILE}" ] && [ "$(cat < "${PIVAS_LIST_FILE}" | wc -l )" -ge 1 ]; then
+		exclude_com=".*.$(cat < "${PIVAS_LIST_FILE}" | tr -d '*' | sed ':a;N;$!ba;s/\n/$|.*./g')$"
+		ready "Удаляем хосты, находящиеся в защищенном списке"
+		TMP_FILE="/opt/tmp/hosts.tmp"
+		cat < "${ADBLOCK_HOSTS_FILE}" | grep -vE "${exclude_com}" > "${TMP_FILE}"
+		mv -f "${TMP_FILE}" "${ADBLOCK_HOSTS_FILE}"
+		when_ok "УСПЕШНО"
+	fi
+}
+
+#--------------------------------------------------------------
+#
+# 	Удаляем все доменные имена, которые у нас имеются
+# 	в списке исключений (белый список)
+#
+#--------------------------------------------------------------
+ads_remove_exception_hosts(){
+
+	if [ -f "${ADBLOCK_LIST_EXCEPTION}" ] && [ "$(cat < "${ADBLOCK_LIST_EXCEPTION}" | wc -l )" -ge 1 ]; then
+		ready "Удаляем хосты, находящиеся в списке исключений"
+		exclude_all="$(get_separated_host_list "${ADBLOCK_LIST_EXCEPTION}")"
+		sed -i "/${exclude_all}/d" "${ADBLOCK_HOSTS_FILE}"
+		when_ok "УСПЕШНО"
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Удаляем из /opt/tmp/adsblock/hosts переданное доменное имя
+#	$1 - список доменных имен разделенных '|'
+#
+# ------------------------------------------------------------------------------------------
+ads_list_hosts_update() {
+	# Удаляем все доменные имена, которые у нас имеются в защищенный список (белый список)
+	# и в списке исключений
+	ads_remove_white_hosts
+	ads_remove_exception_hosts
+}
+

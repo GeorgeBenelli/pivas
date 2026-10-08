@@ -1,0 +1,1008 @@
+#!/bin/sh
+#------------------------------------------------------------------------------
+#	ПАКЕТ ПИВАС
+#------------------------------------------------------------------------------
+#
+#	Данный файл содержит функции для отладки и выявления проблем
+#	в работе пакета ПИВАС
+#
+# ------------------------------------------------------------------------------
+#	Дата создания: 22/05/2022
+#	Лицензия: Apache License 2.0
+# ------------------------------------------------------------------------------------------
+
+. /opt/apps/pivas/bin/libs/main
+
+IP_MYIP2='81.90.181.105'
+IP_IFCONFIG='34.160.111.145'
+DOMAINS_EXCLUDE='(eduz|iscor|nstagra|aceboo|fb|twi|t.c|eddi)'
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Формируем лог отладочной информации
+#
+# ------------------------------------------------------------------------------------------
+dnsmasq_debug() {
+
+	warning "Состояние службы dnsmasq по команде "
+	ready "/opt/etc/init.d/S56dnsmasq status"
+	if /opt/etc/init.d/S56dnsmasq status &> /dev/null; then
+		when_ok "ЗАПУЩЕНА"
+	else
+		when_bad "ОСТАНОВЛЕНА"
+		print_line
+		result=$(/opt/sbin/dnsmasq)
+		case "${result}" in
+		0) warning "Dnsmasq успешно повторно запущен." ;;
+		1)
+			error "Обнаружена проблема с файлом конфигурации"
+			error "Запускаем проверку файла конфигурации dnsmasq"
+			print_line
+			/opt/sbin/dnsmasq --test
+			print_line
+			warning "Файл конфигурации dnsmasq"
+			print_line
+			cat < "/opt/etc/dnsmasq.conf" | sed 's/^\(.*\)\(#.*\)/\2/; /^#/d; /^$/d'
+			print_line
+			exit 1
+			;;
+		2)
+			error "Возникла проблема с доступом к сети"
+			error "используемый адрес, попытка использовать "
+			error "привилегированные порты без разрешения"
+			exit 1
+			;;
+		3)
+			error "Возникла проблема при обращении к файловой системе"
+			error "отсутствующий файл /каталог или разрешения на них."
+			exit 1
+			;;
+		4)
+			error "Сбой выделения памяти."
+			exit 1
+			;;
+		5)
+			error "Невыявленная проблема."
+			exit 1
+			;;
+		11 | *)
+			error "[${result}] Проблемы при выделении адресов для аренды DHCP "
+			exit 1
+			;;
+		esac
+	fi
+	result=$(cat < /opt/etc/dnsmasq.conf | sed 's/^\(.*\)\(#.*\)/\2/; /^#/d; /^$/d')
+	echo_debug "Выборка из файла конфигурации dnsmasq: /opt/etc/dnsmasq.conf" "${result}"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Формируем лог отладочной информации
+#
+# ------------------------------------------------------------------------------------------
+vpn_debug() {
+
+	vpn_cli_desc=$(get_current_vpn_interface "cli_desc")
+	vpn_cli=$(get_current_vpn_interface "cli")
+	connected=$(is_vpn_interface_connected "${vpn_cli}")
+	ready "Состояние vpn соединения ${vpn_cli_desc}"
+	if [ "${connected}" = 'on' ]; then
+		when_ok "ПОДКЛЮЧЕНО"
+#		ip_vpn=$(ip a | grep "${vpn_entware}:" -A2 | grep inet | tr -s ' ' | cut -d" " -f3 | cut -d"/" -f1)
+#		result=$()
+	else
+		when_bad "ОСТАНОВЛЕНО"
+		print_line
+		warning "Проверьте конфигурацию ${vpn_cli_desc} соединения"
+		warning "на странице $(get_router_ip)/controlPanel/otherConnections"
+		print_line
+		exit 1
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Формируем лог отладочной информации
+#
+# ------------------------------------------------------------------------------------------
+shadowsocks_debug() {
+
+	ready "Состояние службы shadowsocks"
+	if /opt/etc/init.d/S22shadowsocks status &> /dev/null; then
+		when_ok "ЗАПУЩЕНА"
+		port=$(cat < '/opt/etc/shadowsocks.json' | grep local_port | cut -d':' -f2 | tr -d ' ,')
+		result=$(netstat -ltunp 2> /dev/null | grep "${SSR_NAME}" | tr -s " ")
+		echo_debug "Отчет по прослушиванию порта shadowsocks [${port}]\nкоманда: netstat -ltunp | grep \"ss-redir\"" "${result}"
+		result=$(cat < /opt/etc/shadowsocks.json | grep -vE "password|server")
+		echo_debug "Выборка из файла конфигурации shadowsocks /opt/etc/shadowsocks.json" "${result}"
+
+	else
+		when_bad "ОСТАНОВЛЕНА"
+		print_line
+		warning "Файл конфигурации shadowsocks"
+		print_line
+		cat < "/opt/etc/shadowsocks.json" | sed 's/^\(.*\)\(#.*\)/\2/; /^#/d; /^$/d'
+		print_line
+		warning "Запускаем shadowsocks в режиме отладки"
+		print_line
+		ssr_run -v
+		print_line
+		exit 1
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Формируем лог отладочной информации
+#
+# ------------------------------------------------------------------------------------------
+pivas__show_list() {
+	if ! [ -f "${PIVAS_LIST_FILE}" ] ; then
+		error "Не найден файл списка ${PIVAS_LIST_FILE}"
+		return
+	fi
+
+	ready 'Количество записей' && when_ok "$(wc -l < ${PIVAS_LIST_FILE})"
+
+	if grep -Fq 'myip2.ru' "${PIVAS_LIST_FILE}" ; then
+		output='есть'
+	else
+		output='нет'
+	fi
+	ready 'myip2.ru' && when_ok "${output}"
+
+	if grep -Fq 'ifconfig.me' "${PIVAS_LIST_FILE}" ; then
+		output='есть'
+	else
+		output='нет'
+	fi
+	ready 'ifconfig.me' && when_ok "${output}"
+
+	echo
+	local count
+	local output
+
+	count=$(grep -Evc -- "${IP_FILTER}" "${PIVAS_LIST_FILE}")
+	if [ "$count" -eq 0 ]; then
+		output='Не используются домены.'
+	else
+		output=$(grep -Ev -- "${IP_FILTER}" "${PIVAS_LIST_FILE}" | grep -vE "${DOMAINS_EXCLUDE}" | head -n 6)
+
+		count="${count}:"
+	fi
+	echo_debug "Доменов ${count}" "${output}"
+
+	count=$(grep -Ec -- "${IP_FILTER}" "${PIVAS_LIST_FILE}")
+	if [ "$count" -eq 0 ]; then
+		output='Не используются IP или диапазоны.'
+	else
+		output=$(grep -E -- "${IP_FILTER}" "${PIVAS_LIST_FILE}" | head -n 6)
+
+		count="${count}:"
+	fi
+	echo_debug "IP ${count}" "${output}"
+}
+
+hide_num_letters(){
+	line=${1};  nums=5; replacement="*****"
+	if [ "${#line}" -le ${nums} ] ; then hided_line=${replacement}; 
+	else hided_line="${replacement}${line:${nums}}"; 
+	fi
+	echo ${hided_line}
+}
+
+
+check_words_in_multiline_var() {
+    local multiline_var="$1"
+    local words="$2"
+
+    echo "${multiline_var}" | while IFS= read -r line; do
+        for word in $words; do
+            if [[ ! "${line//timeout*/}" == *"$word"* ]]; then
+                # echo "Слово '$word' не найдено в переменной."
+                return 1
+            fi
+        done
+    done
+	# echo "Слово '$word' найдено в переменной."
+    return 0
+}
+
+iptables__get_by_chain() {
+	if [ -z "${1}" ] ; then
+		error "[${FUNCNAME}] Не задан обязательный аргумент — цепочка"
+		return
+	fi
+	chain_name="${1}"
+
+	save_iptables | grep -F "${chain_name}" | grep -Fv :"${chain_name}"
+}
+
+iptables__text_empty() {
+	if [ -z "${1}" ] ; then
+		error "[${FUNCNAME}] Не передан обязательный параметр — что именно не найдено"
+		return
+	fi
+	echo "${1} не найдены!"
+
+	# если вызывается как один из дебагов, то можно передать silent/short
+	if [ -z "${2}" ] ; then
+		echo 'Сообщите об этом https://t.me/pivas_pro и вызовите pivas reset'
+	fi
+}
+
+cmd_debug_iptables() {
+	local cache output title
+
+	cache=$(/opt/sbin/ipset list "${IPSET_DESTINATION_EXCLUDED}" | grep -vF ':')
+
+	output=$(echo "${cache}" | wc -l)
+	ready 'Исключённых целевых IPv4 и диапазонов' && when_ok "${output}"
+
+	output=$(get_external_ip)
+	if [ -n "${output}" ]; then
+		if echo "${cache}" | grep -q "${output}"; then
+			output='исключён'
+		else
+			output='возможны loopback'
+		fi
+
+		ready 'Интернет шлюз' && when_ok "${output}"
+	fi
+
+	title=$(get_tunnel_ip)
+	if [ -z "${title}" ]; then
+		output='возможны loopback'
+	else
+		output='исключён'
+
+		IFS=$'\n'
+		for tunnel_ip in ${title} ; do
+			if ! echo "${cache}" | grep -q "${tunnel_ip}"; then
+				output='возможны loopback'
+			fi
+		done
+	fi
+	ready 'Тоннель' && when_ok "${output}"
+
+	echo
+	output=$(ip route)
+	echo_debug 'Подключения (соединитесь с гостевой заранее)' "${output}"
+
+	if is_shadowsocks_enabled ; then
+		title='Перенаправление в порт'
+		output="${CHAIN_DNAT_TO_PORT}"
+	else
+		output=$(ip route show table "${ROUTE_TABLE_ID}")
+		if [ -z "${output}" ] ; then
+			output=$(iptables__text_empty 'Маршруты тоннеля' "${1}")
+		else
+			title=$(ip rule show | grep -F "$(ip4__rule__get_sub)")
+			if [ -z "${title}" ] ; then
+				output=$(iptables__text_empty 'Правила перенаправления' "${1}")
+			else
+				output="${output}"'\n'"${title}"
+			fi
+		fi
+		echo_debug 'Политика' "${output}"
+
+		title='Маркировка'
+		output="${CHAIN_MARK}"
+	fi
+	output=$(iptables__get_by_chain "${output}")
+	if [ -z "${output}" ] ; then
+		output=$(iptables__text_empty 'Правила' "${1}")
+	fi
+	echo_debug "${title}" "${output}"
+
+	output=$(iptables__get_by_chain "${CHAIN_DNS}")
+	if [ -z "${output}" ] ; then
+		output=$(iptables__text_empty 'Правила' "${1}")
+	fi
+	echo_debug 'DNS' "${output}"
+
+	output=$(iptables -L PREROUTING -t mangle)
+	echo_debug 'PREROUTING mangle' "${output}"
+
+	output=$(iptables -L PREROUTING -t nat)
+	echo_debug 'PREROUTING nat' "${output}"
+}
+
+cmd_debug_adguard() {
+	echo 'Полная поддержка AdGuardHome будет доделана в скором времени.'
+}
+
+dnsmasq__is_working() {
+	# DNSMasq
+	if ! [ -f "${DNSMASQ_CONFIG}" ] ; then
+		error "Не найден файл настроек ${DNSMASQ_CONFIG}"
+	elif ! [ -f "${DNSMASQ_IPSET_HOSTS}" ] ; then
+		error "Не найден файл настроек ${DNSMASQ_IPSET_HOSTS}"
+	elif ! command -v dnsmasq 2>&1 >/dev/null ; then
+		error 'Не найдена команда dnsmasq'
+	elif ! dnsmasq --test 2>&1 | grep -Fq 'check OK' ; then
+		error "Ошибка в файлах конфигурации ${DNSMASQ_CONFIG} или ${DNSMASQ_IPSET_HOSTS}"
+	elif ! [ -f "${DNSMASQ_DEMON}" ] ; then
+		error "Не найден файл запуска ${DNSMASQ_DEMON}"
+	elif ! "${DNSMASQ_DEMON}" status | grep -Fq 'alive' ; then
+		error 'Не запущен DNSMasq'
+
+	# DNSCrypt
+	elif ! [ -f "${DNSCRYPT_CONFIG}" ] ; then
+		error "Не найден файл настроек ${DNSCRYPT_CONFIG}"
+	elif ! command -v dnscrypt-proxy 2>&1 >/dev/null ; then
+		error 'Не найдена команда dnscrypt-proxy'
+	elif ! dnscrypt-proxy -config "${DNSCRYPT_CONFIG}" -check 2>&1 | grep -Fq 'successfully checked' ; then
+		error "Ошибка в файле конфигурации ${DNSCRYPT_CONFIG}"
+	elif ! [ -f "${DNSCRYPT_DEMON}" ] ; then
+		error "Не найден файл запуска ${DNSCRYPT_DEMON}"
+	elif ! "${DNSCRYPT_DEMON}" status | grep -Fq 'alive' ; then
+		error 'Не запущен DNSCrypt'
+
+	else
+		true
+		return
+	fi
+
+	false
+}
+
+get_netstat() {
+	if [ -z "${1}" ] ; then
+		error "[${FUNCNAME}] Не задан обязательный аргумент — фильтр"
+		return
+	fi
+	local filter="${1}"
+
+	local output=$(netstat -tulpn 2>/dev/null | grep -F -- "${filter}" | grep -v -- ':[0-9][0-9][0-9][0-9][0-9]')
+	if [ -z "${output}" ] ; then
+		output="Сетевые соединения для ${filter} не найдены."
+
+		if [ -n "${2}" ] ; then
+			output="${output}"$'\n'"${2}"
+		fi
+	fi
+	echo "${output}"
+}
+
+cmd_debug_dnsmasq() {
+	if ! dnsmasq__is_working ; then
+		echo 'Дальнейшая проверка DNSMasq остановлена.'
+		return
+	fi
+
+
+	if grep -q -- '^filter-rr=HTTPS' "${DNSMASQ_CONFIG}" ; then
+		local output='отключен'
+	else
+		local output='включен'
+	fi
+	ready 'DNS ECH' && when_ok "${output}"
+
+	if grep -q -- '^cache-size=0' "${DNSMASQ_CONFIG}" ; then
+		output='отключен'
+	else
+		output='включен'
+	fi
+	ready 'Кэш' && when_ok "${output}"
+
+	local cached=$(dnsmasq -v)
+	if echo "${cached}" | grep -Fq 'regex' ; then
+		output='есть'
+	else
+		output='нет'
+	fi
+	ready 'Модуль regex'   && when_ok "${output}"
+	ready 'DNSMasq версия' && when_ok "$(echo "${cached}" | grep -Eo 'version [0-9\.]+' | head -n 1 | cut -d ' ' -f2)"
+
+	echo_debug 'DNSMasq слушает:' "$(get_netstat 'dnsmasq')"
+
+
+	ready 'Сайтов для сбора IP' && when_ok "$(grep /${IPSET_TABLE_NAME} ${DNSMASQ_IPSET_HOSTS} | wc -l)"
+
+	if grep -q "ipset=/myip2.ru/${IPSET_TABLE_NAME}" "${DNSMASQ_IPSET_HOSTS}" ; then
+		output='есть'
+	else
+		output='нет'
+	fi
+	ready 'myip2.ru' && when_ok "${output}"
+
+	if grep -q "ipset=/ifconfig.me/${IPSET_TABLE_NAME}" "${DNSMASQ_IPSET_HOSTS}" ; then
+		output='есть'
+	else
+		output='нет'
+	fi
+	ready 'ifconfig.me' && when_ok "${output}"
+
+	echo_debug \
+		"Часть конфига (обязательны строчки вида ipset=/домен/${IPSET_TABLE_NAME}):" \
+		"$(grep -vE ${DOMAINS_EXCLUDE} ${DNSMASQ_IPSET_HOSTS} | head -n6)"
+
+
+	cached=$(grep 'server=' "${DNSMASQ_CONFIG}"      | head -1 | cut -d '=' -f2)
+	ready 'DNS запросы передаются' && when_ok "${cached}"
+
+	cached=$(grep 'server=' "${DNSMASQ_IPSET_HOSTS}" | head -1 | cut -d '/' -f3)
+	if [ -n "${cached}" ] ; then
+		ready 'DNS запросы списка передаются' && when_ok "${cached}"
+	fi
+
+	if grep -q '^cache = true' "${DNSCRYPT_CONFIG}" ; then
+		output='включен'
+	else
+		output='отключен'
+	fi
+	ready 'Кэш' && when_ok "${output}"
+
+	ready 'DNSCrypt версия' && when_ok "$(dnscrypt-proxy -version)"
+	echo_debug 'DNSCrypt слушает:' "$(get_netstat 'dnscrypt')"
+}
+
+cmd_debug_dns() {
+	if has_adguard_enable ; then
+		cmd_debug_adguard
+	else
+		cmd_debug_dnsmasq
+	fi
+
+	ready 'IPv6 адрес DNS сервера' && when_ok "$(get_dhcpv6_status)"
+	ready 'NDNProxy версия' && when_ok "$(ndnproxy 2>&1 | grep -Eo 'ndnproxy [0-9\.]+' | head -n 1 | cut -d' ' -f2)"
+
+	local output
+
+	# если вызывается как один из дебагов, то можно передать silent/short
+	if [ -n "${1}" ] ; then
+		output=''
+	else
+		output="$(hint__if_ndnproxy_disabled)"
+	fi
+	echo_debug 'Комплектный DNS роутера (базово) слушает:' "$(get_netstat 'ndnproxy' "${output}")"
+
+	if [ -z "${1}" ] ; then
+		output="$(hint__if_dns_ipv6)"
+		if [ -n "${output}" ] ; then
+			echo "${output}"
+			echo
+		fi
+	fi
+}
+
+cmd_ipset_flush() {
+	echo -n 'Очистка IPSet...'
+	/opt/sbin/ipset flush "${IPSET_TABLE_NAME}"
+	echo 'сделана.'
+
+	# Как минимум DNSMasq при попадании в кэш не заполняет IPSet
+	# А в нём у нас clear-on-reload
+	echo -n 'Сброс кэша DNS...'
+	if has_adguard_enable ; then
+		local service="${ADGUARDHOME_DEMON}"
+	else
+		local service="${DNSMASQ_DEMON}"
+	fi
+	"${service}" restart &> /dev/null
+	echo 'сделана.'
+
+	echo -n 'Заполнение IPSet IP из списка..'
+	local count=0
+	IFS=$'\n'
+	for ip_or_range in $(grep -E -- "$(get_regexp_ip_or_range)" '/opt/etc/pivas.list'); do
+		/opt/sbin/ipset -exist add "${IPSET_TABLE_NAME}" "${ip_or_range}" timeout 0
+
+		count=$((count + 1))
+		if [ "$(( ${count} % 50 ))" -eq 0 ]; then
+			echo -n '.'
+		fi
+	done
+	echo 'сделано.'
+
+	echo
+	echo 'На ПК запустите cmd от администратора и выполните там ipconfig /flushdns'
+	echo 'После этого перезапустите командную строку и браузер.'
+	echo 'В командной строке введите nslookup myip2.ru'
+	echo 'Проверьте заполнение списка через pivas ipset'
+	echo
+}
+
+cmd_ipset_add() {
+	if [ -z "${1}" ]; then
+		error 'Не передан обязательный параметр, что добавлять.'
+
+		echo 'Можете передать myip2, ifconfig или любой IP '
+		echo ' для добавления в целях теста тоннеля.'
+		print_line
+
+		exit 1
+	fi
+
+	if [ "${1}" = 'myip2' ]; then
+		local ip="${IP_MYIP2}"
+	elif [ "${1}" = 'ifconfig' ]; then
+		local ip="${IP_IFCONFIG}"
+	elif echo "${1}" | grep -qE -- "${IP_FILTER}"; then
+		local ip="${1}"
+	else
+		error "Параметр ${1} не известен."
+
+		echo 'Можете передать myip2, ifconfig или любой IP '
+		echo ' для добавления в целях теста тоннеля.'
+		print_line
+
+		exit 2
+	fi
+
+	echo -n "Добавление ${ip} в IPSet..."
+	/opt/sbin/ipset -exist add "${IPSET_TABLE_NAME}" "${ip}"
+	echo 'сделано.'
+
+	echo
+}
+
+cmd_ipset_refill() {
+	echo -n 'Переобход списка..'
+	. /opt/apps/pivas/bin/main/ipset_domain
+	echo 'сделано.'
+
+	echo
+}
+
+cmd_ipset() {
+	if ! ip4__ipset__is_exist "${IPSET_TABLE_NAME}" ; then
+		error "Не найден IPSet ${IPSET_TABLE_NAME}"
+		return
+	fi
+
+	if [ -n "${1}" ]; then
+		if ! echo "${1}" | grep -qE "^${IP_FILTER}$"; then
+			error "Параметр ${1} не известен."
+
+			echo 'Можете передать любой IP для проверки его наличия в списке для попадания в тоннель,'
+			echo 'или вызвать команду без этого параметра.'
+			return 1
+		fi
+	fi
+
+	local output=$(/opt/sbin/ipset list "${IPSET_TABLE_NAME}" | grep -vF ':' | wc -l)
+	ready 'Количество записей' && when_ok "${output}"
+
+	if /opt/sbin/ipset list "${IPSET_TABLE_NAME}" | grep -qF "${IP_MYIP2}"; then
+		output='есть'
+	else
+		output='нет'
+	fi
+	ready 'myip2.ru' && when_ok "${output}"
+
+	if /opt/sbin/ipset list "${IPSET_TABLE_NAME}" | grep -qF "${IP_IFCONFIG}"; then
+		output='есть'
+	else
+		output='нет'
+	fi
+	ready 'ifconfig.me' && when_ok "${output}"
+
+	if [ -n "${1}" ]; then
+		if /opt/sbin/ipset list "${IPSET_TABLE_NAME}" | grep -q "^${1} "; then
+			output='есть'
+		else
+			output='нет'
+		fi
+		ready "${1}" && when_ok "${output}"
+	fi
+
+	echo
+
+	local cached=$(/opt/sbin/ipset list "${IPSET_TABLE_NAME}" | grep -vF 'timeout 0' | grep -vF ':')
+	if [ -z "${cached}" ]; then
+		local count='0'
+
+		output='Или не приходило ещё ни одного DNS-запроса о доменах из pivas list;\nили ошибки в конфигурации DNS'
+		if [ -z "${2}" ] ; then
+			# если вызывается как один из дебагов, то можно передать silent/short
+			output="${output}, вызовите pivas debug dns"
+		fi
+		output="${output}"';\nили проблема с перехватом DNS'
+		if [ -z "${2}" ] ; then
+			# если вызывается как один из дебагов, то можно передать silent/short
+			output="${output}, вызовите pivas debug iptables"
+		fi
+		output="${output}."
+	else
+		local count=$(echo "${cached}" | wc -l)
+
+		# геморрой из-за неподдержки -k в sort
+		output=''
+		IFS=$'\n'
+		for ttl in $(echo "${cached}" | cut -d' ' -f3 | sort -n -r -u | head -n 7); do
+			output="${output}"$(echo "${cached}" | grep -F "${ttl}" | cut -d' ' -f1 | sort)$'\n'
+		done
+		output=${output:0:-1}
+
+		cached=', последние:'
+	fi
+	echo_debug "Для доменов ${count}${cached}" "${output}"
+
+	count=$(/opt/sbin/ipset list "${IPSET_TABLE_NAME}" | grep -F 'timeout 0' | wc -l)
+	if [ "$count" -eq 0 ]; then
+		if grep -Eq -- "${IP_FILTER}" "${PIVAS_LIST_FILE}"; then
+			output='Или нет корректных IP, диапазонов в pivas list;\nили проблема с их переносом'
+			if [ -z "${2}" ] ; then
+				# если вызывается как один из дебагов, то можно передать silent/short
+				output="${output}, вызовите pivas ipset clear"
+			fi
+			output="${output}."
+		else
+			output='Не используются IP или диапазоны в pivas list.'
+		fi
+
+		cached=''
+	else
+		output=$(/opt/sbin/ipset list "${IPSET_TABLE_NAME}" | grep -F 'timeout 0' | head -n 15 | cut -d' ' -f1)
+
+		cached=', произвольные 15:'
+	fi
+	echo_debug "Для IP ${count}${cached}" "${output}"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверка наличия ip адресов хостов в таблице ipset
+#
+# ------------------------------------------------------------------------------------------
+pivas_list_ipset_check(){
+
+	echo "Проверка наличия ip адресов хостов в таблице ipset"
+
+	HAS_NO_ADDRESS=;NOT_IN_TABLE=;
+	sleep 2
+	local bad_ipset_list=""
+	if [ -f "${PIVAS_LIST_FILE}" ]; then
+		result_ipset=$(ipset list ${IPSET_TABLE_NAME} | grep -vEi '^[a-z]' | sort )
+		if [ -n "${result_ipset}" ]; then
+			while read -r line || [ -n "${line}" ]; do
+				[  -z "${line}" ] && continue
+				[ "${line::1}" = "#" ] && continue
+				#  Удаляем из слова первую * и затем меняем все 
+				line="${line/\*/}"
+				hided_line="$(hide_num_letters "${line}")"
+
+				dns_ip=$(get_config_value DNS_DEFAULT)
+
+				if echo "${line}" | grep -qE "${IP_FILTER}|${NET_FILTER}" ; then
+					ips=${line}; ips=${ips//,/ }
+				else
+					ips=$(get_iplist_from_domain "${line}" "${dns_ip}" | tr '\n' ',')
+					ips="${ips::-1}"
+				fi
+				if [ -z "$ips" ] || [ "${ips}" = 0.0.0.0 ]; then
+                	bad_ipset_list="$(printf "%s\n%s%s" "${bad_ipset_list}" "$(ready "${BLUE}${line}${NOCL}")" "$(when_alert "АДРЕСА НЕТ")")"
+					HAS_NO_ADDRESS=true
+	            else
+					line_ips="${hided_line} ${ips}"
+					len_str=${#line_ips}
+					difflen=$((LENGTH - len_str))
+					_len=$((LENGTH - ${#line} - 18))
+					if [ "${difflen}" -lt 0 ]; then 
+						cutted="${ips:0:${_len}}...";
+	 				else 
+						cutted="${ips} "; 
+					fi
+                   
+					if ! check_words_in_multiline_var "${result_ipset}" "${ips}" ; then
+						bad_ipset_list="$(printf "%s\n%s%s" "${bad_ipset_list}" "$(ready "${RED}${line}${NOCL} ${cutted}")" "$( when_bad "ОТСУТСТВУЕТ")")"
+						NOT_IN_TABLE=true
+					fi
+
+				fi
+				
+			done < "${PIVAS_LIST_FILE}"
+
+			# Удаляем пустые строки
+			bad_ipset_list=$(printf "%s" "${bad_ipset_list}" | sed '/^$/d')
+			if [ -n "${bad_ipset_list}" ] ; then 
+				print_line
+				echo -e "${RED}ВНИМАНИЕ!${NOCL} Выводятся только записи с ошибками: ОТСУТСТВУЕТ и АДРЕСА НЕТ"
+				print_line
+				printf '%s' "$bad_ipset_list"
+			else 
+				print_line
+				echo -e "${GREEN}Все записи в таблице ${BLUE}${IPSET_TABLE_NAME}${NOCL} ${GREEN}прошли проверку.${NOCL}"
+			fi 
+
+		else
+			error "Таблица защиты ${IPSET_TABLE_NAME} отсутствует в списке ipset"
+			echo -e "Проверьте работу скрипта ${GREN}/opt/apps/pivas/bin/main/ipset${NOCL}, запустив его."
+		fi
+	else
+		error "Отсутствует защищенный список /opt/etc/pivas.list"
+		echo -e "Добавьте домены в этот список командой ${GREN}pivas add <domain.ru>${NOCL}"
+	fi
+
+	[ "${HAS_NO_ADDRESS}" = true ] && {
+		echo; print_line
+		echo -e "Значение ${BLUE}АДРЕСА НЕТ${NOCL} - это может говорить о том, что адрес этого"
+		echo -e "домена не определяется утилитами ${BLUE}kdig${NOCL} или ${BLUE}dig${NOCL}."
+		echo ''
+		echo -e "    | Как правило, все крупные домены, которые вмещают в себя"
+		echo -e "    | множество поддоменнов и которые часто динамически обновляют"
+		echo -e "    | свои ${BLUE}диапазоны IP${NOCL} - не дают определять свой корневой ${BLUE}IP${NOCL} и "
+		echo -e "    | пишут обратный (реверсивный) адрес в виде строки."
+		echo -e "    |"
+		echo -e "    | В этом случае, необходимо подходить творчески и добавлять в"
+		echo -e "    | список не корневое доменное имя, как например с ${BLUE}google.com${NOCL},"
+		echo -e "    | а конкретный интересующий Вас субдомен, вроде ${BLUE}bard.google.com.${NOCL}"
+		echo -e ""
+		echo -e "${GREEN}Потому, в данном случае, рекомендуется удалить текущий домен с ошибкой${NOCL}"
+		echo -e "${GREEN}и добавить конкретный субдомен.${NOCL}"
+		echo -e ""
+	}
+
+	[ "${NOT_IN_TABLE}" = true ] && {
+		print_line
+		echo -e "Значение ${RED}ОТСУТСТВУЕТ${NOCL} - это может говорить о том, что адрес доменного имени "
+		echo -e "был корректно определен при помощи утилит ${BLUE}kdig${NOCL} или ${BLUE}dig${NOCL}, но по какой-то "
+		echo -e "причине, пока не был добавлен в текущую {BLUE}ipset{NOCL} таблицу."
+		echo ''
+	}
+
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Формируем лог отладочной информации
+#
+# ------------------------------------------------------------------------------------------
+pivas_adguard_debug() {
+
+#	result=$(cat < "/opt/apps/pivas/bin/main/adguard" | sed 's/^\(.*\)\(#.*\)/\2/; /^#/d; /^$/d')
+#	echo_debug "Скрипт заполнения защищенный список /opt/apps/pivas/bin/main/dnsmasq" "${result}"
+	result=$(cat < "${ADGUARD_IPSET_FILE}" | sed 's/^\(.*\)\(#.*\)/\2/; /^#/d; /^$/d' | sed -e '$d' | sed 's/^...../*****/' )
+	echo_debug "Блок записей по ipset в ${ADGUARD_IPSET_FILE}" "${result}"
+	
+	result=$(cat < "${ADGUARDHOME_LOG}" | sed 's/^\(.*\)\(#.*\)/\2/; /^#/d; /^$/d' | tail -20)
+	echo_debug "Журнал загрузки AdGuard Home в ${ADGUARDHOME_LOG}" "${result}"
+
+
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Формируем лог отладочной информации
+#
+# ------------------------------------------------------------------------------------------
+adblock_dnsmasq_debug() {
+
+	if [ -n "$(cat < '/opt/etc/dnsmasq.conf' | sed '/^$/d' | sed 's/^\(.*\)\(#.*\)/\2/; /^#/d; /^$/d' | grep "adblock.dnsmasq")" ]; then
+#		result=$(cat < "/opt/apps/pivas/bin/main/adblock")
+#		echo_debug "Скрипт заполнения списка блокировки рекламы/opt/apps/pivas/bin/main/adblock" "${result}"
+		result=$(cat < '/opt/etc/adblock.dnsmasq' | sed -e '/^#/d; /^$/d' )
+		echo_debug "Список блокировки рекламы /opt/etc/adblock.dnsmasq (все записи)" "${result}"
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Формируем лог отладочной информации
+#
+# ------------------------------------------------------------------------------------------
+
+syslog__get_command() {
+	local command='ndmc -c show log'
+	# исключаем мусор от работы API
+	command="${command} | grep -vF 'started Session /var/run/ndm'"
+	command="${command} | grep -vF 'Session: client disconnected'"
+	# исключаем мусор от cron
+	command="${command} | grep -vF '/opt/bin/run-parts /opt/etc/cron'"
+	command="${command} | grep -vF 'last message repeated'"
+
+	if [ -n "${1}" ] && [ "${1}" != 'all' ] ; then
+		# emerg alert crit err warning notice info debug
+		local facility="${1}"
+		if [ "${facility}" == 'info' ]; then
+			facility='I'
+		elif [ "${facility}" == 'err' ] || [ "${facility}" == 'error' ] ; then
+			facility='E'
+		else
+			error "[${FUNCNAME}] Неизвестный уровень/тип ошибки"
+			return
+		fi
+
+		command="${command} | grep '^${facility}'"
+	else
+		# мешает пустая строка с неизвестным символом
+		command="${command} | grep -F ' '"
+	fi
+	if [ -n "${2}" ] ; then
+		command="${command} | grep -"
+
+		local filter="${2}"
+		if [ "${filter:0:1}" == '!' ]; then
+			filter="${filter:1}"
+
+			command="${command}v"
+		fi
+
+		command="${command}F -- '${filter}'"
+	fi
+
+	echo "${command}"
+}
+
+syslog__show() {
+	if [ -n "${1}" ] ; then
+		local facility="${1}"
+	else
+		local facility='all'
+	fi
+	if [ -n "${2}" ] ; then
+		local filter="${2}"
+	else
+		local filter=''
+	fi
+
+	local command
+	command=$(syslog__get_command "${facility}" "${filter}")
+	# быстрая проверка, чтобы не хранить огромный текст в переменной
+	if [ $(eval "${command}" | head -c1 | wc -c) -eq 0 ] ; then
+		return
+	fi
+
+	if [ -n "${3}" ] ; then
+		local title="${3}"
+	else
+		local title='Лог:'
+	fi
+	if [ -n "${4}" ] ; then
+		# передан лимит
+		command="${command} | tail -n${4}"
+	fi
+
+	print_line
+	echo "${title}"
+	print_line
+	eval "${command}"
+	echo
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Формируем лог отладочной информации
+#
+# ------------------------------------------------------------------------------------------
+ping_debug() {
+	#  host=$(cat < '"${PIVAS_LIST_FILE}"' | sed 's/^\(.*\)\(#.*\)/\2/; /^#/d; /^$/d' | tr -s '\n' | head -1)
+	host='myip2.ru'
+	result=$(ping -c3 "${host}")
+	echo_debug "Прозвон ${host}" "${result}"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Формируем лог отладочной информации
+#
+# ------------------------------------------------------------------------------------------
+router_info() {
+	ready 'Время' && when_ok "$(date +'%y-%m-%d %T %Z')"
+
+	local info_cache=$(curl -s "${LOCALHOST_IP}:79/rci/show/defaults")
+	ready 'Модель'   && when_ok $(echo "${info_cache}" | jq -r '.ndmhwid  // empty')
+	ready 'Название' && when_ok $(echo "${info_cache}" | jq -r '.product  // empty')
+	ready 'Страна'   && when_ok $(echo "${info_cache}" | jq -r '.country  // empty')
+	ready 'Регион'   && when_ok $(echo "${info_cache}" | jq -r '.country_ // empty')
+
+	info_cache=$(cat /opt/etc/entware_release)
+	ready 'Архитектура' \
+		&& when_ok $(echo "${info_cache}" | grep -F 'arch='   | cut -d'=' -f2 | xargs)
+	ready 'Версия ядра Linux' \
+		&& when_ok $(echo "${info_cache}" | grep -F 'Kernel' | grep -oE '[0-9\.]+')
+	ready        $(echo "${info_cache}" | grep -F 'NAME'    | cut -d'=' -f2 | xargs) \
+		&& when_ok $(echo "${info_cache}" | grep -F 'VERSION' | cut -d'=' -f2 | xargs)
+
+	info_cache=$(curl -s "${LOCALHOST_IP}:79/rci/show/version")
+	ready 'Версия KeenOS' && when_ok $(echo "${info_cache}" | jq -r '.title // empty')
+}
+
+pivas__show_config() {
+	cat < "${PIVAS_CONF_FILE}" | grep -v '=$' | grep -v '^$'
+}
+
+pivas__show_install_log() {
+	if ! [ -f "${INSTALL_LOG}" ] ; then
+		return
+	fi
+
+	print_line
+	echo "Журнал установки [${INSTALL_LOG}]:"
+	print_line
+	cat < "${INSTALL_LOG}" | sed 's/\(^Текущее.*\) .*$/\1/'
+	echo
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Формируем лог доступных подключений и их названия в entware и CLI
+#
+# ------------------------------------------------------------------------------------------
+
+show_guest_nets(){
+	list=$(cat <  "${PIVAS_CONF_FILE}" | sed -n 's/INFACE_GUEST_ENT=\(.*\)/\1/p;'| sed 's/[ ]//g; s/^\,//')
+	[ -n "${list}" ] && {
+		ready "Список гостевых сетей"
+		when_ok "${list}"
+	}
+}
+
+show_services_status(){
+	. /opt/apps/pivas/bin/libs/vpn
+	cmd_vpn_status
+	cmd_ads_status
+	if [ -f "${ADGUARDHOME_DEMON}" ] && cmd_adguardhome_status | grep -q ВКЛЮЧЕН ; then
+		cmd_adguardhome_status
+	else
+		cmd_dns_crypt_status_show
+		cmd_dnsmasq_dns_change
+	fi
+	show_guest_nets
+
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Формируем лог отладочной информации
+#
+# ------------------------------------------------------------------------------------------
+cmd_print_debug() {
+
+	if [ -z "${1}" ] ; then
+		print_debug
+	else
+		# ready "Записываем данные отладки в файл ${1}..."
+		REP='_'
+		print_debug | sed -E "s/\\\033\[[0-9;]*[a-zA-Z]//g" | tee "${1}" 
+		#&& when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+	fi
+}
+
+print_debug() {
+	echo -e " ${BLUE}Роутер${NOCL}"
+	print_line
+	router_info
+	echo
+	syslog__show 'info'  '!ПИВАС' 'Последние информационные сообщения [pivas syslog info]:' 20
+	syslog__show 'error' '!ПИВАС' 'Последние ошибки [pivas syslog error]:'                  20
+
+	print_line
+	echo -e " ${BLUE}ПИВАС${NOCL}"
+	print_line
+	pivas__show_config
+	echo
+	pivas__show_install_log
+	syslog__show 'info'  'ПИВАС' 'Последние информационные сообщения [pivas log info]:' 20
+	syslog__show 'error' 'ПИВАС' 'Последние ошибки [pivas log error]:'                  20
+
+	print_line
+	echo -e " ${BLUE}Сетевые правила [pivas debug iptables]${NOCL}"
+	print_line
+	cmd_debug_iptables
+
+	print_line
+	echo -e " ${BLUE}DNS-сервера [pivas debug dns]${NOCL}"
+	print_line
+	cmd_debug_dns
+
+	print_line
+	echo -e " ${BLUE}Список пользователя [pivas list]${NOCL}"
+	print_line
+	pivas__show_list
+
+	print_line
+	echo -e " ${BLUE}Список IP для попадания в тоннель [pivas ipset]${NOCL}"
+	print_line
+	cmd_ipset
+
+	print_line
+	echo -e " ${BLUE}Подключения [pivas tunnel]${NOCL}"
+	print_line
+	cmd_tunnel
+
+	print_line
+	echo -e " ${BLUE}Маршрутизация [pivas route]${NOCL}"
+	print_line
+	cmd_route 'short'
+}

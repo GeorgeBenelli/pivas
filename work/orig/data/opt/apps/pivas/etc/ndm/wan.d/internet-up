@@ -1,0 +1,19 @@
+#!/bin/sh
+
+# All state writers share one lock; nested calls retain its owner token.
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py try-locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+
+
+if [ "${1}" = "stop" ] ; then
+	. /opt/apps/pivas/bin/libs/route
+	log_error "Интернет соединение ${interface} прервано. Восстанавливаем доступ к сети: ip=${address}, mask=${mask}, gw=${gateway}."
+	ip4_up_net_default "${interface}" "${address}" "${mask}" "${gateway}"
+	exit 0
+else
+	exit 1
+fi
+
+

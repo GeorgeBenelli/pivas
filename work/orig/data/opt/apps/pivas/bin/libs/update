@@ -1,0 +1,57 @@
+#!/bin/sh
+. /opt/apps/pivas/bin/libs/main
+. /opt/apps/pivas/bin/libs/vpn
+#
+# Извлекаем ссылку на скачивание пакета с github
+#
+
+#
+#	Производим проверку обновления пакета AdGuardHome и скачиваем в случае появления новой версии
+#
+cmd_adguard_update(){
+
+	exit_when_dnsmasq_on status no_warring; 
+	
+	if [ "${status}" = 0 ] ; then
+		bin_path=/opt/bin
+		full_adguard_name=AdGuardHome
+
+		url_update=$(get_github_latest_update_url AdguardTeam "${full_adguard_name}")
+
+		if [ -n "${url_update}" ] ; then
+
+			latest_version=$(echo "${url_update}" | sed 's/.*download\/\(v.*\)\/.*/\1/')
+			current_version=$(AdGuardHome --version | cut -d' ' -f4)
+
+			if [ "${latest_version}" != "${current_version}" ]; then
+				copy_name=${bin_path}/${full_adguard_name}_${current_version}
+
+				mess_2="Копия сохранена под именем ${copy_name}"
+				warning "Найдено обновление пакета ${full_adguard_name} версии ${latest_version}"
+				print_line
+				ready "${BLUE}Обновляем пакет ${full_adguard_name}...${NOCL}"
+				{
+					curl -kfsSL "${url_update}" -o "/tmp/${full_adguard_name}.tar.gz"
+		#			Делаем копию предыдущей версии пакета
+
+					cp -f "${bin_path}/${full_adguard_name}" "${copy_name}"
+					tar x -zf /tmp/${full_adguard_name}.tar.gz -C /tmp
+					mv -f /tmp/${full_adguard_name}/${full_adguard_name} ${bin_path}/${full_adguard_name}
+					chmod +x ${bin_path}/${full_adguard_name}
+					/opt/etc/init.d/S99adguardhome restart &>/dev/null
+				} 2> "${ERROR_LOG_FILE}"
+
+				ready_status "${?}" "Ошибка обновления ${full_adguard_name}"
+				echo "${mess_2}"
+			else
+				warning "Обновлений для ${full_adguard_name} не найдено."
+			fi
+		else
+			arch=$(grep "arch" /opt/etc/entware_release | cut -f2 -d"=")
+			error "Для Вашей архитектуры процессора '${arch}' обновления не найдены." nl
+		fi
+	else
+		error "Сервис AdGuard Home ОТКЛЮЧЕН. Для продолжения необходимо\nзапустить команду pivas adguard on"
+	fi
+
+}

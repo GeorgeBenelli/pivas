@@ -1,0 +1,3564 @@
+#!/bin/sh
+
+. /opt/apps/pivas/bin/libs/debug
+. /opt/apps/pivas/bin/libs/ndm
+. /opt/apps/pivas/bin/libs/adblock
+. /opt/apps/pivas/bin/libs/tags
+. /opt/apps/pivas/bin/libs/vless
+
+MINUS=10
+
+# Убираем ошибки связанные с отсутствием /opt/etc/hosts
+[ -f /opt/etc/hosts ] || touch /opt/etc/hosts
+# ------------------------------------------------------------------------------------------
+#
+# 	Добавляет хосты в белый список, доступ к сайтам которого
+#   осуществляется через Shadowsocks
+#
+#	Дата: 21/05/2022
+#	Лицензия: Apache License 2.0
+#	75 функций (на 23/07/2022)
+#	
+# ------------------------------------------------------------------------------------------
+#	Основные переменные для работы скрипта
+# ------------------------------------------------------------------------------------------
+
+DNS_IP_PORT="${LOCALHOST_IP}#${MAIN_DNS_PORT}"
+CMD_LIST="address prefix name-servers"
+
+# ------------------------------------------------------------------------------------------
+#
+# Обновляем таблицу iptable и правила в ней
+#
+# ------------------------------------------------------------------------------------------
+update_iptables(){
+	ready "${prefix}Очищаем все ранее созданные iptables правила."
+	# возможно чистить цепочки и роутинг — лишнее
+	ip4__flush 'chain table' &>/dev/null && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+
+	ready "${prefix}Создаем перехват DNS для домашней сети."
+	ip4__dns__add_routing_for_home &> /dev/null && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+
+	ready "${prefix}Создаем iptables правила."
+	ip4_firewall_set_all_rules &> /dev/null && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+# Обновляем правила ipset
+#
+# ------------------------------------------------------------------------------------------
+
+# Пересоздаем таблицу ipset для AdGuard Home и перезапускаем сервис
+refresh_adguard_ipset_table(){
+	ready "${prefix}Заполняем AdGuard таблицу данными из защищенного списка."
+	/opt/apps/pivas/bin/main/adguard &>/dev/null && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+}
+
+update_ipset(){
+	stage="${1}"
+
+	ready "${prefix}Заполняем ipset таблицу данными из защищенного списка"
+	/opt/apps/pivas/bin/main/ipset &> /dev/null &
+	[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+
+	if [ -f /opt/etc/init.d/S56dnsmasq ] ; then
+		refresh_dnsmasq_ipset_table
+	else
+		refresh_adguard_ipset_table
+		[ "${stage}" = initd ] || {
+			ready "${prefix}Перезапускаем сервис AdGuard Home"
+			/opt/etc/init.d/S99adguardhome restart &>/dev/null && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+		}
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+# Обновляем правила adblock если этот режим включен
+#
+# ------------------------------------------------------------------------------------------
+update_adblock(){
+
+	if [ -f '/opt/etc/init.d/S56dnsmasq' ]; then
+			if cat < '/opt/etc/dnsmasq.conf' | sed 's/^\(.*\)\(#.*\)/\2/; /^#/d; /^$/d' | grep -q "${ADBLOCK_HOSTS_FILE}" &> /dev/null; then
+				ready "${prefix}Обновляем данные списка блокировки рекламы."
+				/opt/apps/pivas/bin/main/adblock &>/dev/null && when_ok "ГОТОВО" || when_bad "ОШИБКА"
+			fi
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+# Обновляем дату роутера с сервером времени
+#
+# ------------------------------------------------------------------------------------------
+update_time(){
+	ready "${prefix}Синхронизируем дату роутера с сервером времени."
+	date_update &>/dev/null && when_ok "ГОТОВО" || when_bad "ОШИБКА"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+# Производим перезапуск подключения к интернету
+#
+# ------------------------------------------------------------------------------------------
+current_cli_vpn_interface() {
+        inface_entware=$(get_config_value INFACE_ENT)
+        inface=$(grep "${inface_entware}" "${INFACE_NAMES_FILE}"  | cut -d'|' -f1)
+        echo "${inface}"
+}
+
+reset_all_connection(){
+	ready "${prefix}Перезапускаем VPN и ISP соединения..."
+	{
+		if is_shadowsocks_enabled ; then
+			log_warning 'Перезапуск клиента ShadowSocks (рестарт тоннеля)'
+
+			/opt/etc/init.d/S22shadowsocks stop &>/dev/null
+			# reset_ISP_connection
+			/opt/etc/init.d/S22shadowsocks start &>/dev/null
+		else
+			inface=$(current_cli_vpn_interface)
+			log_warning "Перезапуск сетевого интерфейса ${inface}"
+
+			if is_vless_over_proxy_enabled ; then
+				log_warning 'Перезапуск клиента VLESS (рестарт тоннеля)'
+
+				${XRAY_INIT} restart
+			fi
+
+			cli_request="localhost:79/rci/interface/${inface}"
+#			curl -s -d '{"down":"true"}' "${cli_request}"  &>/dev/null
+#			reset_ISP_connection
+			curl -s -d '{"up":"true"}' "${cli_request}"  &>/dev/null
+		fi
+	} && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+
+}
+
+# ------------------------------------------------------------------------------------------
+#
+# 	Производим инициализацию пакета ПИВАС
+# 	$1 	- режим запуска функции имеет следующие значения:
+#		update 		- режим обновления при выполнении pivas update
+#		refresh 	- режим обновления списка доменов при командах add/del/import
+#	    initd		- обновить время при установке пакета
+# ------------------------------------------------------------------------------------------
+cmd_pivas_init(){
+	[ -f /opt/etc/pivas.paused ] && return 0
+
+	stage="${1:-no}"
+	prefix=''
+	mess="${prefix}Производим сброс пакета ПИВАС в исходное состояние."
+	warning "${mess}"
+	print_line
+
+#	Производим перезапуск подключения к интернету
+#	если не режим update и если текущее подключение не ssr
+	if [ "${stage}" = refresh ] || ! has_ssr_enable ; then
+			reset_all_connection
+	fi
+
+	update_iptables
+	update_ipset "${stage}"
+	update_adblock
+
+	[ "${stage}" = initd ] && update_time || all_services_restart
+
+	# ip4__flush + ip4__route__add_table внутри init могут оставить
+	# table 1001 пустой (INFACE_ENT=Pivas-proxy-vless ≠ t2s21).
+	# S95 start идемпотентен, DNS не трогает.
+	if [ -x /opt/etc/init.d/S95pivas-routes ]; then
+		/opt/etc/init.d/S95pivas-routes start >/dev/null 2>&1 || true
+	fi
+	# split DNS: server=/домен/ для списков (pivas import и т.п.)
+	[ -x /opt/apps/pivas/bin/main/dnscrypt_pin ] && /opt/apps/pivas/bin/main/dnscrypt_pin dnsmasq >/dev/null 2>&1
+
+	#log_alert "${prefix}Сброс пакета ПИВАС в исходное состояние ЗАВЕРШЕН!"
+
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Лёгкое применение изменений pivas.list (add/del одного домена).
+#	В отличие от cmd_pivas_init НЕ трогает xray, туннель, dnscrypt и iptables:
+#	добавление домена — это только ipset=/домен/ в dnsmasq (нужен restart dnsmasq,
+#	HUP ipset= не перечитывает) плюс IP-строки в ipset. Раньше pivas add
+#	перезапускал xray дважды, dnscrypt, dnsmasq и передёргивал интерфейс —
+#	с обрывом всех VPN-соединений и риском пустой table 1001.
+#
+# ------------------------------------------------------------------------------------------
+cmd_pivas_refresh_lists() {
+    # DNS policy, ipset rules and Xray routing are one validated transaction.
+    /opt/apps/pivas/bin/main/dnscrypt_pin dnsmasq || return 1
+    /opt/apps/pivas/bin/main/ipset >/dev/null 2>&1
+    [ -f /opt/etc/pivas.paused ] || /opt/etc/init.d/S95pivas-routes start
+}
+
+
+service_restart(){
+	srv_name=${1}
+	srv_initd=${2}
+	ready "Перезапускаем ${srv_name}"
+	if "/opt/etc/init.d/${srv_initd}" restart &> /dev/null; then
+		when_ok "УСПЕШНО"
+	else
+		when_bad "ОШИБКА"
+		error "Запустите диагностику командой pivas debug"
+	fi
+}
+
+all_services_restart() {
+	if has_adguard_enable ; then
+		log_warning 'Перезапуск DNS сервера AdGuardHome'
+
+		service_restart 'DNS сервер AdGuardHome' 'S99adguardhome'
+	else
+		log_warning 'Перезапуск служб DNS'
+
+		service_restart 'DNS сервер DNSMasq'  'S56dnsmasq'
+		service_restart 'DNS сервер DNSCrypt' 'S09dnscrypt-proxy2'
+	fi
+
+	if is_shadowsocks_enabled ; then
+		log_warning 'Перезапуск клиента ShadowSocks (рестарт всех служб)'
+
+		service_restart 'клиент ShadowSocks' 'S22shadowsocks'
+	elif is_vless_over_proxy_enabled ; then
+		log_warning 'Перезапуск клиента VLESS'
+
+		service_restart 'клиент VLESS' 'S24xray'
+	fi
+}
+
+
+is_dns_override() {
+	curl -s '127.0.0.1:79/rci/opkg/dns-override' | grep -qF 'true'
+}
+
+get_dhcpv6_status() {
+	local api_ipv6
+	api_ipv6=$(curl -s '127.0.0.1:79/rci/ipv6' | jq -c '.')
+
+	if [ "${api_ipv6}" == '{}' ]; then
+		# Не факт, что IPv6 DNS отключен вместе с сегментом
+		# no ipv6 subnet Default
+		echo 'сегмент IPv6 отключен'
+		return
+	fi
+
+	if ! echo "${api_ipv6}" | grep -qF '"Default":'; then
+		# Сегмент IPv6 Default удалён, но не факт, что IPv6 DNS отключен
+		echo 'сегмент IPv6 не стандартный'
+		return
+	fi
+
+	if echo "${api_ipv6}" | grep -qF '"dhcp":true'; then
+		# mode dhcp
+		echo 'DHCPv6 включен'
+		return
+	fi
+
+	if echo "${api_ipv6}" | grep -qF '"bind":'; then
+		# bind Home
+		echo 'сегмент IPv6 привязан'
+		return
+	fi
+
+	echo 'сегмент IPv6 отвязан и DHCPv6 отключен'
+}
+
+
+config__get_opkg_file() {
+	if [ -z "${1}" ]; then
+		error "[${FUNCNAME}] Не передан обязательный параметр — файл"
+		return
+	fi
+
+	echo "${1}-opkg"
+}
+
+config__backup_as_opkg_if_not_exist() {
+	if [ -z "${1}" ]; then
+		error "[${FUNCNAME}] Не передан обязательный параметр — файл"
+		return
+	fi
+	local source_file="${1}"
+
+	local backup_file
+	backup_file=$(config__get_opkg_file "${source_file}")
+
+	if [ -f "${backup_file}" ]; then
+		# копия уже есть, только первая соответствует opkg
+		return
+	fi
+
+	log_warning "Сохранение копии как файла из OPKG в ${backup_file}"
+	cp "${source_file}" "${backup_file}"
+}
+
+config__restore_from_opkg() {
+	if [ -z "${1}" ]; then
+		error "[${FUNCNAME}] Не передан обязательный параметр — файл"
+		return
+	fi
+	local source_file="${1}"
+
+	local backup_file
+	backup_file=$(config__get_opkg_file "${source_file}")
+
+	if ! [ -f "${backup_file}" ]; then
+		# исходный opkg-файл не найден
+		return
+	fi
+
+	log_warning "Восстановление исходного файла ${source_file}"
+	mv -f "${backup_file}" "${source_file}"
+}
+
+
+hint__commands_title() {
+	local webcli_url
+	webcli_url="$(get_router_host)/webcli/parse"
+	printf '%s\n' \
+		"Для исправления ситуации перейдите на ${webcli_url}" \
+		'и последовательно введите команды:'
+}
+
+hint__if_ndnproxy_disabled() {
+	if ! is_dns_override ; then
+		return
+	fi
+
+	local commands_title
+	commands_title="$(hint__commands_title)"
+	printf '%b\n' \
+		"Системный ${YELLOW}DNS отключен${NOCL}." \
+		"${commands_title}" \
+		' no opkg dns-override' \
+		' system configuration save' \
+		' system reboot'
+}
+
+hint__if_dns_ipv6() {
+	local dhcpv6_status
+	dhcpv6_status=$(get_dhcpv6_status)
+	if [ "${dhcpv6_status}" != 'DHCPv6 включен' ] && [ "${dhcpv6_status}" != 'сегмент IPv6 привязан' ] ; then
+		return
+	fi
+
+	local commands_title
+	commands_title="$(hint__commands_title)"
+	printf '%b\n' \
+		"Вероятно, часть ${YELLOW}DNS проходит через IPv6${NOCL}." \
+		"${commands_title}" \
+		' ipv6 subnet Default' \
+		' no mode' \
+		' no bind' \
+		' system configuration save' \
+		' system reboot'
+}
+
+
+SUFF=">> "
+# ------------------------------------------------------------------------------------------
+#
+#	Выводим предупреждение в случае, если пользователь
+#	запускает команду для другого DNS сервиса и возвращаем
+#	статус запущенной службы в случае, когда запущен именно AdGuard Home
+#
+# ------------------------------------------------------------------------------------------
+exit_when_adguard_on(){
+	if cmd_adguardhome_status | grep -q "ВКЛЮЧЕН" ; then
+		[ -z "${2}" ] && {
+			echo -e "${SUFF}${BLUE}Сейчас функции DNS сервера, шифрования DNS трафика и функции блокировки рекламы ${NOCL}"
+			echo -e "${SUFF}${BLUE}исполняет AdGuard Home, заменяющий связку [dnsmasq + dnscrypt_proxy2 + adblock].${NOCL}"
+			echo -e "${SUFF}${BLUE}Единовременно Пивас может работать только с одной из этих связок.${NOCL}"
+			echo -e "${SUFF}${BLUE}Для перехода на связку с dnsmasq запустите команду ${GREEN}pivas adguard off${NOCL}"
+		}
+        eval "${1}=1";
+    else
+        eval "${1}=0";
+    fi
+}
+exit_when_dnsmasq_on(){
+	if ! cmd_adguardhome_status | grep -q "ВКЛЮЧЕН" ; then
+		[ -z "${2}" ] && {
+			echo -e "${SUFF}${BLUE}Сейчас функции DNS сервера, шифрования DNS трафика и функции блокировки рекламы${NOCL}"
+			echo -e "${SUFF}${BLUE}исполняет связка [dnsmasq + dnscrypt_proxy2 + adblock], заменяющая AdGuard Home.${NOCL}"
+			echo -e "${SUFF}${BLUE}Единовременно Пивас может работать только с одной из этих связок.${NOCL}"
+			echo -e "${SUFF}${BLUE}Для перехода на AdGuard Home запустите команду ${GREEN}pivas adguard on${NOCL}"
+		}
+        eval "${1}=1";
+    else
+        eval "${1}=0";
+    fi
+}
+
+
+ip4() (/opt/sbin/ip -4 "$@")
+# ------------------------------------------------------------------------------------------
+#
+#	Функция вывода помощи по работе скрипта
+#
+# ------------------------------------------------------------------------------------------
+cmd_help() {
+	cat < "/opt/apps/${APP_NAME}/etc/conf/${APP_NAME}.help"
+}
+
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем значение любого параметра заданного CLI интерфейса
+#	$1 - ID CLI интерфейса с учетом регистра
+#	$2 - название параметра
+#
+# ------------------------------------------------------------------------------------------
+get_value_interface_field() {
+	id_cli_inface=${1}
+	field_name=${2}
+	sleep 1
+	curl -s "${INFACE_REQUEST}" | jq -r '.[] | select(.id=="'"${id_cli_inface}"'") | .'"${field_name}"
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем текущий интерфейс по умолчанию через который раздается интернет
+#
+# ------------------------------------------------------------------------------------------
+get_defaultgw_interface() {
+	curl -s "${INFACE_REQUEST}" | jq -r '.[] | select(.defaultgw==true and .global==true) | ."interface-name"'
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем текущий id по умолчанию через который раздается интернет
+#
+# ------------------------------------------------------------------------------------------
+get_defaultgw_id() {
+	curl -s "${INFACE_REQUEST}" | jq -r '.[] | select(.defaultgw==true and .global==true) | .id'
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Функция вЫключения IPv6
+#	$1 - CLI интерфейс
+#
+# ------------------------------------------------------------------------------------------
+ipv6_inface_off() {
+
+	inface="${1}"
+	if [ -n "${inface}" ]; then
+		ready "Поддержка IPv6 на интерфейсе ${inface} отключена"
+		for cmd in ${CMD_LIST}; do
+	#		для отключения инфейса необходимо отправить команду no
+	#		по всем командам ipv6: address prefix name-servers
+			curl -s -d '{"auto":true,"no":true}' "${INFACE_PART_REQUEST}/${inface}/ipv6/${cmd}" &> /dev/null
+		done
+		if [ $? = 0 ]; then when_ok "УСПЕШНО"; else when_bad "СБОЙ"; fi
+	else
+		when_bad "СБОЙ" && error "Не задан интерфейс"
+	fi
+
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Функция включения IPv6
+#	$1 - CLI интерфейс
+#
+# ------------------------------------------------------------------------------------------
+ipv6_inface_on() {
+	inface="${1}"
+#	Проверка на наличие заданного интерфейса в роутере
+	if is_cli_inface_present "${inface}"; then
+		if [ -n "${inface}" ]; then
+			ready "Поддержка IPv6 на интерфейсе ${inface} подключена"
+				for cmd in ${CMD_LIST}; do
+		#		для отключения инфейса необходимо отправить команду auto
+		#		по всем командам ipv6: address prefix name-servers
+					curl -s -d '{"auto":true}' "${INFACE_PART_REQUEST}/${inface}/ipv6/${cmd}" &> /dev/null
+				done
+			if [ $? = 0 ]; then when_ok "УСПЕШНО"; else when_bad "СБОЙ"; fi
+		else
+			when_bad "СБОЙ" && error "Не задан интерфейс"
+		fi
+	else
+		when_bad "СБОЙ" && error "Заданный интерфейс ${inface} не существует"
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Функция проверки статуса IPv6
+#	$1 - CLI интерфейс
+#	Возвращает:
+#	0 - ipv6 подключен
+#	1- ipv6 отключен
+#	2 - ipv6 не совместим с указанным интерфейсом
+#
+# ------------------------------------------------------------------------------------------
+ipv6_status() {
+	inface="${1}"; res=0
+	if [ -n "${inface}" ]; then
+		for cmd in ${CMD_LIST}; do
+			#		для отключения инфейса необходимо получить ответ true
+			#		по всем командам ipv6: address prefix name-servers
+			request=$(curl -s "${INFACE_PART_REQUEST}/${inface}/ipv6/${cmd}")
+#			если интерфейс не совместим с IPV6, то выходим из цикла
+			echo "${request}" | grep -q 'not IPv6 compatible' && res=-1 && break
+			echo "${request}" | grep -q true && res=$((res+1))
+
+		done
+#		если вернем 1 - то IPv6 отключен
+#		если вернем 0 - то IPv6 включен
+#		если вернем 2 - то IPv6 несовместим с указанным интерфейсом
+		[ "${res}" -eq 3 ] && echo 0
+		[ "${res}" -eq -1 ] && echo 2
+		[[ "${res}" -ge 0 ]] && [[ "${res}" -lt 3 ]] && echo 1
+
+	else
+		when_bad "СБОЙ"
+		error "Не задан интерфейс"
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Функция проверки фактического наличия в списке доступного CLI интерфейса
+#	$1 - CLI интерфейс
+#
+# ------------------------------------------------------------------------------------------
+is_cli_inface_present() {
+	inface="${1}"
+	if [ -n "${inface}" ]; then
+		curl -s "${INFACE_REQUEST}" | grep interface-name | grep -q "${inface}"
+	else
+		when_bad "СБОЙ"
+		error "Не задан интерфейс"
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Функция проверки включен ли на заданном CLI интерфейсе поддержка IPv6
+#	$1 - CLI интерфейс
+#
+# ------------------------------------------------------------------------------------------
+ipv6_inface_status() {
+	inface="${1}"
+	if [ -n "${inface}" ]; then
+		if is_cli_inface_present "${inface}" ; then
+			ready "IPv6 на интерфейсе ${inface}"
+			ipv6_status=$(ipv6_status "${inface}")
+			[ "${ipv6_status}" -eq 0 ] && when_ok "ПОДКЛЮЧЕН"
+			[ "${ipv6_status}" -eq 1 ] && when_alert "ОТКЛЮЧЕН"
+			[ "${ipv6_status}" -eq 2 ] && when_bad "НЕ ВОЗМОЖЕН"
+		else
+			error "Указанный интерфейс ${inface} в системе не существует."
+			exit 1
+		fi
+	else
+		when_bad "СБОЙ"
+		error "Не задан интерфейс"
+		exit 1
+	fi
+
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Меняем в файле конфигурации AdGuard Home DNS его адрес, в случае если он равен 0.0.0.0
+# 	 Предотвращаем зависание работы пакета при выборе пользователем,
+# 	 при первоначальной настройке AdGuard Home, опцию "все адреса"
+#
+# ------------------------------------------------------------------------------------------
+adguardhome_change_and_get_config_ip() {
+	ip_filter="[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}"
+	ip_dns_adguard=$(cat < "${ADGUARDHOME_CONFIG}" | sed -n '/^dns/,/port:/p' | grep -o "${ip_filter}")
+#	Если DNS порт установлен в значение 0.0.0.0 (все адреса), то меняем его на ip роутера
+	if [ "${ip_dns_adguard}" = '0.0.0.0' ] ; then
+		ip_dns_adguard=$(get_router_ip)
+		sed -i '/^dns/,/port:/s/'"${ip_filter}/${ip_dns_adguard}"'/' "${ADGUARDHOME_CONFIG}"
+	fi
+	echo "${ip_dns_adguard}"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Производим настройку работы AdGuard Home
+# 	 $1 - содержит 'ip:port' для работы adguardhome
+#
+# ------------------------------------------------------------------------------------------
+adguardhome_setup() {
+
+	ip=$(adguardhome_change_and_get_config_ip)
+	port=${MAIN_DNS_PORT}
+	localhost="127.0.0.1"
+
+	ready "AdGuard Home установлен в качестве основного DNS сервера"
+
+#	в случае установленного dnsmasq останавливаем его и архивируем
+	[ -f /opt/etc/init.d/S56dnsmasq ] && {
+		/opt/etc/init.d/S56dnsmasq status | grep -q alive && /opt/etc/init.d/S56dnsmasq stop &> /dev/null
+		mv -f /opt/etc/init.d/S56dnsmasq "${PIVAS_BACKUP_PATH}"
+	}
+#	в случае наличия сервиса dnscrypt_proxy2 останавливаем его и архивируем
+	[ -f /opt/etc/init.d/S09dnscrypt-proxy2 ] && {
+		/opt/etc/init.d/S09dnscrypt-proxy2 status | grep -q alive && /opt/etc/init.d/S09dnscrypt-proxy2 stop &> /dev/null
+		mv -f /opt/etc/init.d/S09dnscrypt-proxy2 "${PIVAS_BACKUP_PATH}"
+	}
+
+	[ -f "${ADGUARDHOME_DEMON}" ] && ${ADGUARDHOME_DEMON} stop &> /dev/null
+	if [ -f "${ADGUARDHOME_CONFIG}" ]; then
+		config__backup_as_opkg_if_not_exist "${ADGUARDHOME_CONFIG}"
+	fi
+
+#	устанавливаем DNS по умолчанию на ADGUARD
+	set_config_value DNS_DEFAULT "${localhost}#${port}"
+#	меняем номер порта в файле конфигурации adguard
+	sed -i "s/\( port:\) .*/\1 ${port}/" "${ADGUARDHOME_CONFIG}"
+
+	# меняем время обработки TTL адресов 
+	ttl_timeout_min=$(get_config_value LIST_IPSET_TTL)
+	ttl_timeout_max=$((ttl_timeout_min + 3600))
+	sed -i "s/\(  cache_ttl_min:\) .*/\1 ${ttl_timeout_min}/" "${ADGUARDHOME_CONFIG}"
+	sed -i "s/\(  cache_ttl_max:\) .*/\1 ${ttl_timeout_max}/" "${ADGUARDHOME_CONFIG}"
+
+#	если файл сервис adguard в наличии то архивируем файл конфигурации
+	if [ -f "${ADGUARDHOME_DEMON}" ] && [ -f /opt/bin/AdGuardHome.yaml ]; then
+		cp /opt/bin/AdGuardHome.yaml "${PIVAS_BACKUP_PATH}"/AdGuardHome.yaml
+	fi
+#	и копируем подготовленный файл сервиса adguard в папку запуска сервисов
+#	проверяем файл на оригинальность (без переделок ли он под пивас)
+
+	if [ -f "${ADGUARDHOME_DEMON}" ] && ! cat < "${ADGUARDHOME_DEMON}" | grep -q pivas ; then
+#		если оригинальный, то архивируем его
+		mv "${ADGUARDHOME_DEMON}" "${PIVAS_BACKUP_PATH}/S99adguardhome.origin"
+	fi
+	[ -f "/opt/apps/pivas/etc/init.d/S99adguard" ] && cp /opt/apps/pivas/etc/init.d/S99adguard "${ADGUARDHOME_DEMON}"
+#	удаляем сервис запуска пивас так как его теперь будет заменять файл сервиса adguard
+	rm -f "${PIVAS_START_FILE}"
+#	меняем dns в настройках ipset
+	ipset_dns_change "${localhost}#${port}"
+
+#	обязательно добавляем 127.0.0.1 в прослушку ADGUARDHOME
+	sed -n '/bind_hosts:/,/port:/ p;' "${ADGUARDHOME_CONFIG}" | grep -qE "${localhost}"'|localhost' || \
+		sed -i '/bind_hosts:/,/port:/ s/\(port:\)/  \- '"${localhost}"'\n  \1/' "${ADGUARDHOME_CONFIG}"
+
+#	теперь просто запускаем сервис adguard
+#	ndm_interface_change
+
+#	Обновляем правила ip4tables для доступного соединения
+	ip4__flush 'chain'
+	ip4__dns__add_routing_for_home
+	ip4_firewall_set_all_rules
+
+	[ -f "${ADGUARDHOME_DEMON}" ] && "${ADGUARDHOME_DEMON}" start &> /dev/null
+#	отслеживаем результат запуска сервиса adguard
+	if [ $? = 0 ]; then
+		when_ok "УСПЕШНО"
+	else
+		when_bad "СБОЙ";
+		error "Возникла ошибка при установке AdGuard Home в качестве основного DNS сервера."
+		print_line
+		cat < "${ADGUARDHOME_LOG}" | tail
+		exit 1
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Возвращаем IP#port на котором слушает AdGuard Home в качестве основного DNS сервера
+#	 в виде XXX.XXX.XXX.XXX#53
+#
+# ------------------------------------------------------------------------------------------
+get_adguardhome_ip_port() {
+	ip_filter="[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}"
+	ip_dns_adguard=$(cat < "${ADGUARDHOME_CONFIG}" | sed -n '/^dns/,/port:/p' | grep -o "${ip_filter}")
+	echo "${ip_dns_adguard}" | grep -q '0.0.0.0' && dns_ip=$(get_router_ip)
+	echo "${ip_dns_adguard}#${MAIN_DNS_PORT}"
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Возвращаем статус AdGuard Home в качестве основного DNS сервера
+#
+# ------------------------------------------------------------------------------------------
+cmd_adguardhome_status() {
+	local local_ip=""
+	if [ -f /opt/etc/AdGuardHome/AdGuardHome.yaml ] ; then 
+		local_ip="[$(grep address /opt/etc/AdGuardHome/AdGuardHome.yaml | cut -d":" -f2) ]"
+	fi
+	ready "Сервис AdGuard Home ${local_ip}"
+	# Проверяем наличие исполняемого файла AdGuardHome
+
+	if [ -f /opt/bin/AdGuardHome ] ; then
+#		Проверяем наличие файла конфигурации AdGuardHome
+		if [ -f /opt/etc/AdGuardHome/AdGuardHome.yaml ] && grep -q 'pivas.ipset' /opt/etc/AdGuardHome/AdGuardHome.yaml; then
+#			Проверяем наличие сервиса AdGuardHome
+			if [ -f "${ADGUARDHOME_DEMON}" ] ; then
+				if "${ADGUARDHOME_DEMON}" status | grep -q alive; then when_ok "ВКЛЮЧЕН"; else when_bad "ОТКЛЮЧЕН"; fi
+			else
+				when_bad "НУЖНО ПЕРЕУСТАНОВИТЬ"
+			fi
+		else
+			when_bad "НЕ НАСТРОЕН"
+		fi
+	else
+		local _dns_ip=$(get_config_value DNS_DEFAULT)
+		local _router_ip=$(get_router_ip)
+		if [ "${_dns_ip//[#:]*/}" = "${_router_ip//[#:]*/}" ] ; then 
+			when_bad "НЕ УСТАНОВЛЕН"
+		else
+			when_bad "ВНЕШНИЙ"
+		fi
+	fi
+
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Проверяем порт на занятость и если он занят, то убиваем процесс 
+# 	делаем двойную проверку на всякий случай
+#
+# 	$1 - проверяемый порт
+#
+# ------------------------------------------------------------------------------------------
+check_port(){
+
+	local _port="${1}"
+	local _pid=$(netstat -tulnp | grep ":${_port} " | sed -n 's/.* \([0-9]*\)\/.*/\1/p' | head -1)
+	[ -n "${_pid}" ] && {
+		kill -9 "${_pid}"  &> /dev/null
+		_pid=$(netstat -tulnp | grep ":${_port} " | sed -n 's/.* \([0-9]*\)\/.*/\1/p' | head -1)
+		[ -n "${_pid}" ] && kill -9 "${_pid}"  &> /dev/null
+	}
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Производим настройку AdGuard Home в качестве основного DNS сервера
+#
+# ------------------------------------------------------------------------------------------
+adguardhome_check_config() {
+		# Проверяем наличие	архивной копии AdGuardHome
+		if [ -f "${PIVAS_BACKUP_PATH}/AdGuardHome.yaml" ] && [ -f ${ADGUARDHOME_DEMON} ]; then
+			cp "${PIVAS_BACKUP_PATH}/AdGuardHome.yaml" "${ADGUARDHOME_CONFIG}"
+			"${ADGUARDHOME_DEMON}" restart  &> /dev/null
+			ip=$(get_router_ip)
+			port=$(cat < "${ADGUARDHOME_CONFIG}" | grep '^bind_port: ' | cut -d':' -f2 | tr -d ' \n')
+			[ -z "${port}" ] && port="$(cat "${ADGUARDHOME_CONFIG}" | grep 'address:' | cut -d':' -f3)"
+			warning "Был обнаружен и восстановлен архивный файл конфигурации AdGuard Home."
+			warning "Панель управления находится по адресу: ${BLUE}http://${ip}:${port}${NOCL}"
+			print_line
+		else
+			[ -f /opt/etc/init.d/S56dnsmasq ] && /opt/etc/init.d/S56dnsmasq stop &> /dev/null
+			[ -f /opt/etc/init.d/S09dnscrypt-proxy2 ] && /opt/etc/init.d/S09dnscrypt-proxy2 stop &> /dev/null
+			rm -f /opt/var/log/AdGuardHome.log
+			rm -f /opt/etc/AdGuardHome/data/querylog.json
+
+#			Проверяем наличие файла конфигурации AdGuardHome в папке исполняемых файлов
+			if [ -f /opt/bin/AdGuardHome.yaml ] && [ -f "${ADGUARDHOME_DEMON}" ]; then
+#				проверяем файл на оригинальность (без переделок ли он под пивас)
+				if ! cat < "${ADGUARDHOME_DEMON}" | grep -q pivas ; then
+#					если оригинальный, то архивируем его
+					mv "${ADGUARDHOME_DEMON}" "${PIVAS_BACKUP_PATH}/S99adguardhome.origin"
+				fi
+
+				cp /opt/apps/pivas/etc/init.d/S99adguard  /opt/etc/init.d/S99adguardhome
+				cp /opt/bin/AdGuardHome.yaml "${ADGUARDHOME_CONFIG}"
+#				"${ADGUARDHOME_DEMON}" restart  &> /dev/null
+			fi
+			error "Проверьте, что сеть WIFI/Ethernet, с которой Вы заходите " no_nln
+			error "на роутер - та же самая, что и сеть с которой Вы " no_nln
+			error "открываете страницу браузера." no_nln
+			print_line
+			warning "Сейчас, перейдите на клиентское устройство в своем"
+			warning "браузере и зайдите на страницу http://$(get_router_ip):3000 для"
+			warning "настройки AdGuardHome..."
+			print_line
+			warning "В поле 'Веб-интерфейс администрирования' выберите IP "
+			warning "своего роутера выше. В поле 'DNS-сервер' выберите пункт"
+			warning "'Все интерфейсы' и на следующем шаге введите имя и "
+			warning "дважды пароль для входа в интерфейс AdGuardHome Далее, "
+			warning "на следующей странице, нажмите на 'Открыть Панель "
+			warning "Управления'. После чего, установка AdGuard на роутере "
+			warning "завершится автоматически."
+			print_line
+
+#			Совершенно новая установка пакета и его настройка
+			[ -f "${ADGUARDHOME_CONFIG}" ] && rm -f "${ADGUARDHOME_CONFIG}"
+			tmp_conf=/opt/tmp/adguard.conf
+			log_file=/opt/tmp/adguard.log
+			rm -f "${log_file}" "${tmp_conf}"
+			touch "${log_file}"
+
+			# Проверяем стандартные порты
+			check_port 3000
+			check_port ${MAIN_DNS_PORT}
+			
+#			Если случайно был уже запущен какой либо экземпляр процесса AdGuardHome, то удаляем его из памяти
+			pid_to_kill=$(ps -w | grep 'AdGuardHome -l /opt/var/log/AdGuardHome.log' | grep -v 'grep' | cut -d' ' -f1)
+			[ -n "${pid_to_kill}" ] && kill -9 "${pid_to_kill}" &> /dev/null
+#			Запускаем новую чистую настройку AdGuardHome
+			[ -f /opt/bin/AdGuardHome ] || opkg install adguardhome-go &> /dev/null
+			/opt/bin/AdGuardHome -c "${tmp_conf}" -l "${log_file}" &
+			sleep 2
+
+			while true; do
+				if cat < "${log_file}" | grep 'go to http' | grep -qv ':3000' || cat < "${log_file}" | grep -q ' listen tcp 0.0.0.0:3000: bind: address already in use' ; then
+					mv "${tmp_conf}" "${ADGUARDHOME_CONFIG}"
+					killall AdGuardHome
+					adguardhome_setup
+					print_line
+					exit 0
+				fi
+				# Пауза в секундах между проверками
+				sleep 1
+			done
+
+		fi
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Производим локальную установку AdGuard Home в качестве основного DNS сервера
+#
+# ------------------------------------------------------------------------------------------
+adguardhome_install_locally() {
+
+	if [ -f /opt/tmp/opkg.lock ]; then
+		echo "Установите AdGuard Home на роутер после завершения установки пакета"
+		echo -e "Для этого наберите команду ${GREEN}opkg install adguardhome-go${NOCL}"
+		echo "и следуйте рекомендациям на экране, после настройки AdGuard Home"
+		echo "запустите команду ${GREEN}pivas adguard on${NOCL}."
+	else
+	
+		ready "Устанавливаем пакет AdGuard Home на роутер..."
+		{
+			[ -f /opt/etc/init.d/S56dnsmasq ] && /opt/etc/init.d/S56dnsmasq stop &> /dev/null
+			[ -f /opt/etc/init.d/S09dnscrypt-proxy2 ] && /opt/etc/init.d/S09dnscrypt-proxy2 stop &> /dev/null
+
+			# обнуляем файлы конфигурации 
+			> /opt/etc/dnsmasq.d/pivas.dnsmasq
+			> /opt/var/log/AdGuardHome.log
+
+			[ -f /opt/etc/hosts ] && cp /opt/etc/hosts "${PIVAS_BACKUP_PATH}/hosts"
+
+			opkg update &> /dev/null
+			opkg remove adguardhome-go --force-depends &> /dev/null
+			opkg install adguardhome-go --force-maintainer  &> /dev/null
+		} &> /dev/null && when_ok "УСПЕШНО" || when_bad "С ОШИБКОЙ"
+
+		. /opt/apps/pivas/bin/libs/update
+		cmd_adguard_update
+		adguardhome_check_config
+		adguardhome_setup
+	fi
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Производим подключение к AdGuard Home на удаленном устройстве
+#
+# ------------------------------------------------------------------------------------------
+dns_server_install_remotely(){
+
+	local _ip_port=${1}
+	
+	[ -z "${_ip_port}" ] && {
+		print_line
+		read_value "Введите IP:PORT для DNS сервера на другом устройстве:" _ip_port
+	}
+
+	[ -z "${_ip_port}" ] && exit 1
+	if [ "${_ip_port}" = q ] ; then exit_q; print_line; exit 1; fi
+
+	if echo "${_ip_port}" | grep -qE "${IP_PORT_FILTER}" ; then 
+		nslookup ya.ru ${_ip_port/#/:/} &> /dev/null
+		[ $? -eq 0 ] || { error "Введенный адрес ${_ip_port/#/:/} недоступен."; exit 1; }
+		ready "Подключаем DNS сервер на удаленном устройстве..."
+		{
+			cmd_dns_crypt_off
+			cmd_dnsmasq_dns_change "${_ip_port/:/#}" 
+
+		} &> /dev/null && when_ok "УСПЕШНО" || when_bad "С ОШИБКОЙ"
+	else 
+		error "Введен недопустимый IP:PORT для DNS сервера" 
+		exit 1
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Включаем работу AdGuard Home в качестве основного DNS сервера
+#
+# ------------------------------------------------------------------------------------------
+cmd_adguardhome_on() {
+
+	local _answer
+	read_ynq "Хотите подключить AdGuardHome на удаленном устройстве?" _answer
+	if [ "${_answer}" = q ] ; then exit_q; print_line; exit 1; fi
+	if echo "${_answer}" | grep -qi y; then
+		# Если выбрали установку на удаленном устройсвте
+		dns_server_install_remotely ""
+
+	elif echo "${_answer}" | grep -qi n; then
+
+		echo -e "${GREEN}AdGuard Home${NOCL} будет установлен локально"
+		print_line
+		status=$(cmd_adguardhome_status)
+		if echo "${status}" | grep -q "НЕ УСТАНОВЛЕН" ; then
+			error "Пакет AdGuard Home не установлен на роутере." no_newline
+			print_line
+			adguardhome_install_locally
+	#		fi
+		elif echo "${status}" | grep -q "НЕ НАСТРОЕН" ; then
+			adguardhome_check_config
+			adguardhome_setup
+		elif  echo "${status}" | grep -q "НУЖНО ПЕРЕУСТАНОВИТЬ" ; then
+			adguardhome_install_locally
+		else
+			adguardhome_setup
+		fi
+	#	восстанавливаем /opt/etc/hosts
+		[ -f "${PIVAS_BACKUP_PATH}/hosts" ] &&  cp -f "${PIVAS_BACKUP_PATH}/hosts" /opt/etc/hosts
+
+		"${ADGUARDHOME_DEMON}" restart &> /dev/null	
+
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Выключаем работу AdGuard Home в качестве основного DNS сервера
+#
+# ------------------------------------------------------------------------------------------
+cmd_adguardhome_off(){
+	ready "AdGuard Home в качестве DNS сервера удален"
+	[ -f "${ADGUARDHOME_CONFIG}" ] && sed -i "s/\( port:\) .*/\1 0/" "${ADGUARDHOME_CONFIG}"
+	[ -f "${ADGUARDHOME_DEMON}" ] && {
+		${ADGUARDHOME_DEMON} stop &> /dev/null
+		kill -9 $(pgrep AdGuardHome) &> /dev/null	
+	}
+	[ -f "${ADGUARDHOME_CONFIG}" ] && mv -f "${ADGUARDHOME_CONFIG}" "${PIVAS_BACKUP_PATH}/AdGuardHome.yaml"
+	[ -f /opt/etc/init.d/S56dnsmasq ] && {
+		/opt/etc/init.d/S56dnsmasq stop &> /dev/null
+		kill -9 $(pgrep dnsmasq) &> /dev/null
+	}
+	[ -f /opt/etc/init.d/S09dnscrypt-proxy2 ] && {
+		/opt/etc/init.d/S09dnscrypt-proxy2 stop &> /dev/null
+		kill -9 $(pgrep dnscrypt-proxy) &> /dev/null
+	}
+	cp /opt/apps/pivas/etc/init.d/S96pivas "${PIVAS_START_FILE}"
+	dnsmasq_install '' &> /dev/null
+	#	Обновляем правила ip4tables для доступного соединения
+	ip4__flush 'chain'
+	ip4__dns__add_routing_for_home
+	ip4_firewall_set_all_rules
+
+	if [ $? = 0 ]; then
+		when_ok "УСПЕШНО"
+		dns_crypt_install ''
+	else
+		when_bad "С ОШИБКОЙ";
+		error "Возникла ошибка при удалении AdGuard Home из системы."
+		exit 1
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#       Функция подключает гостевую сеть к активному vpn
+#       $1 - ID гостевого моста в entware
+#
+# ------------------------------------------------------------------------------------------
+bridge_vpn_access_del() {
+        guest_bridge_id="${1}"
+		_id=$(echo "${guest_bridge_id}" | sed 's/[a-z]//g')
+		cli_inface=$(curl -s "${INFACE_REQUEST}" | jq -r '.[] | select(.address != null and .id == "'"Bridge${_id}"'") | .description')	    
+		ready "Удаление гостевого интерфейса '${cli_inface}' завершено"
+		{
+
+			ip4__delete_routing_by_list_for_net "${guest_bridge_id}"
+
+			#       Слушаем 53 порт гостевого интерфейса
+			guest_net_ip=$(/opt/sbin/ip a | grep global | grep -E ' '"${guest_bridge_id}" | sed 's/inet \(.*\)\/.*/\1/' | tr -d ' ')
+			if cmd_adguardhome_status | grep -q "ВКЛЮЧЕН" ; then
+	#               Если доступен ADGUARDHOME
+					sed -i -e '/bind_hosts/,/port/{ /- '"${guest_net_ip}"'/d }' "${ADGUARDHOME_CONFIG}"
+#                       grep -v '    -'"${guest_net_ip}" /opt/tmp/agh.conf
+#                       mv -f /opt/tmp/agh.conf "${ADGUARDHOME_CONFIG}"
+			else
+	#               Если сейчас работает только dnsmasq
+					sed -i -e '/listen-address/,/port/{ /listen-address='"${guest_net_ip}"'/d}' "${DNSMASQ_CONFIG}"
+#                       grep -v 'listen-address='"${guest_net_ip}" "${DNSMASQ_CONFIG}" > /opt/tmp/dnsmasq.conf
+#                       mv -f /opt/tmp/dnsmasq.conf "${DNSMASQ_CONFIG}"
+			fi
+        } && when_alert "УСПЕШНО" || when_bad "С ОШИБКОЙ"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#       Функция выводит список гостевых сетей в наличии
+# ------------------------------------------------------------------------------------------
+ikev2_include_to_list(){
+        ikev2=$(curl -s "${LOCALHOST_IP}:79/rci/crypto/virtual-ip-server-ikev2")
+        if [ -n "${ikev2}" ]; then
+                net_pool=$(echo "${ikev2}" | grep pool-start | cut -d':' -f2 | sed 's/[\,\" ]//g;')
+                echo "${ikev2}" | grep enable | grep -q true && status="ВКЛ. " || status="ОТКЛ."
+				echo "${ikev2}" | grep enable | grep -q true && color="${GREEN}" || color="${RED}"
+				
+				txt="1. Сеть \"VPN-сервер\" IKEv2 [${net_pool}]"
+				prn="$(_join_ready "${txt}" "${status}" "${color}" $((LENGTH - MINUS)))"
+                ready "${prn}"
+                cat < "${PIVAS_CONF_FILE}" | grep 'INFACE_GUEST_ENT=' | grep -q "[^_]ikev2" && when_ok "ДОБАВЛЕНА" || when_alert "НЕ ДОБАВЛЕНА"
+        fi
+
+}
+
+_join_ready() {
+	color=${3}
+        size=$(diff_len "${1}" "${4}")
+        printf "%b%-${size}s%b" "${1}"
+      	echo -e ${color}${2}${NOCL}
+}
+
+guest_include_to_list(){
+	
+	num=${1}
+	desc_full=${2}
+	ent_inf=${3}
+
+
+	
+	echo "${desc_full}" | grep -q 'is up' && color=${GREEN} || color=${RED}
+	echo "${desc_full}" | grep -q 'is up' && status="ВКЛ. " || status="ОТКЛ."
+
+	_desc="$(echo "${desc_full}" | sed 's/^\(.*\) is.*$/\1/')"
+#       отображаем все гостевые интерфейсы
+	prn="$(_join_ready "${num}. Сеть ${_desc}" "${status}" ${color} $((LENGTH - MINUS)))"
+        ready "${prn}"
+        cat < "${PIVAS_CONF_FILE}" | grep 'INFACE_GUEST_ENT=' | grep -q "[^_]${ent_inf}" && when_ok "ДОБАВЛЕНА" || when_alert "НЕ ДОБАВЛЕНА"
+}
+
+warning_info(){
+	clear
+	error "ВНИМАНИЕ!"
+	print_line
+	warning "Касается всех типов интерфейсов, кроме ${BLUE}IKEv2${NOCL} ${GREEN}и${NOCL} ${BLUE}WIFI${NOCL} ${GREEN}сетей.${NOCL}"
+	warning "Прежде чем продолжить, подключите, каждый из них, в панели управления роутером!"
+	error "Интерфейс должен быть подключен к серверу и иметь свой IP!" ln
+	warning "В противном случае, он не будет отображаться в списке сетей."
+	print_line
+	echo "Если все сделали, нажмите любую клавишу."
+	read -s -n 1
+    clear
+	print_line
+
+}
+cmd_bridge_vpn_access_list() {
+
+	[ "${2}" = skip ] || {
+		# warning_info
+		echo "Полный список подключенных гостевых сетей:"
+		print_line
+	}
+
+	wild="${1}"
+	selected_vpn=$(get_config_value INFACE_CLI)
+#       Список интерфейсов которые доступны в формате '"vps" [OpenVPN] -> 192.168.255.14 ВКЛ.'
+#       или если адреса нет, то в формате '"Моя сеть" [SSTP] откл.'
+	interfaces_json=$(curl -s "${INFACE_REQUEST}" )
+#       Убираем основной мост Bridge0, все сети GigabitEthernet | Port | AccessPoint | WifiMaster | WifiStation
+	interfaces_list=$(echo "${interfaces_json}" | jq -r '.[]
+					| select(
+						.address != null
+						and .id != "'"${selected_vpn}"'"
+						and .id != "Bridge0"
+						and .type != "GigabitEthernet"
+						and .type != "Port"
+						and .type != "AccessPoint"
+						and .type != "WifiMaster"
+						and .type != "WifiStation"
+						and .type != "Vlan"
+					) | ("\"" + .description +
+						"\" " + .id	+
+						" [" + .address + "] " +
+						" is " + .state)' )
+
+	num=0
+	#        Подключаем IKEv2 VPN-сервер
+	if cat < "${PIVAS_CONF_FILE}" | grep 'INFACE_GUEST_ENT=' | grep -qi ikev2; then
+			if [ -z "${wild}" ] || [ "${wild}" = del ]; then
+					ikev2_item=$(ikev2_include_to_list)
+					[ -n "${ikev2_item}" ] && {
+						echo "${ikev2_item}"
+						num=1
+					}
+			fi
+	else
+			if [ -z "${wild}" ] || [ "${wild}" = add ]; then
+					ikev2_item=$(ikev2_include_to_list)
+
+					[ -n "${ikev2_item}" ] && {
+						echo "${ikev2_item}"
+						num=1
+					}
+			fi
+	fi
+	[ -n "${interfaces_list}" ] && {
+
+		printf '%s\n' "${interfaces_list}" |
+		while IFS= read -r desc_full ; do
+		
+			if echo "${desc_full}" | grep -q Bridge ; then
+				net_ip=$(echo "${desc_full}" | sed 's/.*\[\([0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\)\].*/\1/')
+				ent_inf=$(/opt/sbin/ip a | grep global | grep "${net_ip}" | sed 's/.* \(.*\)$/\1/')
+			else
+				desc=$(echo "${desc_full}" | sed 's|\"\(.*\)\".*|\1|')
+				ent_inf=$(cat /opt/etc/inface_equals | grep "${desc}" | cut -d'|' -f2)
+			fi
+			if cat < "${PIVAS_CONF_FILE}" | grep 'INFACE_GUEST_ENT=' | grep -qi "${ent_inf}"; then
+
+				if [ -z "${wild}" ] || [ "${wild}" = del ]; then
+					num=$((num + 1))
+					guest_include_to_list "${num}" "${desc_full}" "${ent_inf}"
+				fi
+			else
+				if [ -z "${wild}" ] || [ "${wild}" = add ]; then
+					num=$((num + 1))
+					guest_include_to_list "${num}" "${desc_full}" "${ent_inf}"
+				fi
+			fi
+		done
+	}
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#       Функция удаляет гостевую сеть из активного vpn
+#
+# ------------------------------------------------------------------------------------------
+
+del_ikev2_net_from_config(){
+		has_guest_nets=$(cat <  "${PIVAS_CONF_FILE}" | sed -n 's/INFACE_GUEST_ENT=\(.*\)/\1/p;'| sed 's/[ ,]//g')
+        [ -n "${has_guest_nets}" ] && point=',' || point=''
+        sed -i '/INFACE_GUEST_ENT=/,/^$/ s/ikev2[,]\{0,1\}//; s/[ ]//g' "${PIVAS_CONF_FILE}"
+}
+
+ikev2_net_access_del() {
+	ready "Удаление интерфейса \"VPN-сервер IKEv2\" завершено" && {
+		ip4__delete_routing_by_list_for_net 'ikev2'
+	} && when_alert "УСПЕШНО" || when_bad "С ОШИБКОЙ"
+}
+
+cmd_bridge_vpn_access_del() {
+
+    guest_bridge_id=''; bridge_inface_select guest_bridge_id del
+
+	if [ -n "${guest_bridge_id}" ]; then
+#			проверяем, есть ли в списке ikev2
+		if echo "${guest_bridge_id}" | grep -iq ikev2 ; then
+			del_ikev2_net_from_config
+			ikev2_net_access_del
+		else
+			bridge_vpn_access_del "${guest_bridge_id}"
+			sed -i '/INFACE_GUEST_ENT=/,/^$/ s/'"${guest_bridge_id}"'[,]\{0,1\}//; s/[ ,]//g' "${PIVAS_CONF_FILE}"
+		fi
+		ready "Перезапускаем DNS сервер"
+		if cmd_adguardhome_status | grep -q "ВКЛЮЧЕН" ; then
+			/opt/etc/init.d/S99adguardhome restart &> /dev/null
+		else
+			/opt/etc/init.d/S56dnsmasq restart &> /dev/null
+		fi
+		[ $? = 0 ] && when_alert "УСПЕШНО" || when_bad "С ОШИБКОЙ"
+
+	fi
+
+	
+
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#       Функция подключает гостевую сеть к активному vpn
+#       $1 - ID гостевого моста в entware
+#
+# ------------------------------------------------------------------------------------------
+bridge_access_add() {
+
+        guest_bridge_id=${1}; 
+# set -xe
+		_id=$(echo "${guest_bridge_id}" | sed 's/[a-z]//g')
+		cli_inface=$(curl -s "${INFACE_REQUEST}" | jq -r '.[] | select(.address != null and .id == "'"Bridge${_id}"'") | .description')	    
+		ready "Добавление гостевого интерфейса '${cli_inface}' завершено"
+# set +xe
+#		если сеть уже есть в списке, то пропускаем добавление
+		grep INFACE_GUEST_ENT "${PIVAS_CONF_FILE}" | grep -q "${guest_bridge_id}" || {
+			has_guest_nets=$(cat <  "${PIVAS_CONF_FILE}" | sed -n 's/INFACE_GUEST_ENT=\(.*\)/\1/p')
+			[ -n "${has_guest_nets}" ] && point=',' || point=''
+			sed -i "s/\(INFACE_GUEST_ENT=.*\)/\1${point}${guest_bridge_id}/g; s/[ ]//g" "${PIVAS_CONF_FILE}"
+		}
+
+#       Слушаем 53 порт гостевого интерфейса
+        guest_net_ip=$(/opt/sbin/ip a | grep global | grep -E ' '"${guest_bridge_id}" | sed 's/inet \(.*\)\/.*/\1/' | tr -d ' ')
+        if cmd_adguardhome_status | grep -q "ВКЛЮЧЕН" ; then
+#           Если доступен ADGUARDHOME
+			grep -q "\- ${guest_net_ip}" "${ADGUARDHOME_CONFIG}" || \
+				sed -i '/bind_hosts/,/port/ s/.*\(port.*\)/    - '"${guest_net_ip}"'\n  \1/1' "${ADGUARDHOME_CONFIG}"
+        else
+#           Если сейчас работает только dnsmasq
+			grep -q "listen-address=${guest_net_ip}" "${DNSMASQ_CONFIG}" || \
+				sed -i '/listen-address/,/port/ s/.*\(port.*\)/listen-address='"${guest_net_ip}"'\n\1/' "${DNSMASQ_CONFIG}"
+
+        fi
+        [ $? = 0 ] && when_alert "УСПЕШНО" || when_bad "С ОШИБКОЙ"
+}
+
+ikev2_setup() {
+	ikev2_data="${1}"
+	enable=${2:-true}
+
+	ikev2_dns=$(get_router_ip)
+	#TODO: вынести получение параметра в функцию
+	dns_server=$(echo "${ikev2_data}" | grep -F -- 'dns-server' | cut -d':' -f2 | sed 's/[\,\" ]//g;')
+	enable=$(echo "${ikev2_data}"     | grep -F    'enable'     | cut -d':' -f2 | sed 's/[\,\" ]//g;')
+	nat=$(echo "${ikev2_data}"        | grep -F    'nat'        | cut -d':' -f2 | sed 's/[\,\" ]//g;')
+	if [ "${dns_server}" != "${ikev2_dns}" ] || [ "${enable}" != true ] || [ "${nat}" != true ] ; then
+		# Если DNS отличен от IP роутера, или интерфейс, или NAT отключены
+		pool_size=$(echo "${ikev2_data}"   | grep -F -- 'pool-size'   | cut -d':' -f2 | sed 's/[\,\" ]//g;')
+		pool_start=$(echo "${ikev2_data}"  | grep -F -- 'pool-start'  | cut -d':' -f2 | sed 's/[\,\" ]//g;')
+		multi_login=$(echo "${ikev2_data}" | grep -F -- 'multi-login' | cut -d':' -f2 | sed 's/[\,\" ]//g;')
+		sa_compat=$(echo "${ikev2_data}"   | grep -F -- 'sa-compat'   | cut -d':' -f2 | sed 's/[\,\" ]//g;')
+
+		curl -s -d '{"enable": '"${enable}"', "nat": true, "dns-server": "'"${ikev2_dns}"'", "pool-size": "'"${pool_size}"'", "pool-start": "'"${pool_start}"'", "multi-login": "'"${multi_login}"'", "sa-compat": "'"${sa_compat}"'"}' \
+		 "${LOCALHOST_IP}:79/rci/crypto/virtual-ip-server-ikev2" &> /dev/null
+		sleep 1
+	fi
+}
+
+add_ikev2_net_to_config(){
+        has_guest_nets=$(cat <  "${PIVAS_CONF_FILE}" | sed -n 's/INFACE_GUEST_ENT=\(.*\)/\1/p;'| sed 's/[ ]//g')
+        [ -n "${has_guest_nets}" ] && point=',' || point=''
+        del_ikev2_net_from_config
+        sed -i "s/\(INFACE_GUEST_ENT=.*\)/\1${point}ikev2/g; s/[ ]//g" "${PIVAS_CONF_FILE}"
+}
+
+ikev2_net_access_add() {
+	local ikev2_settings=$(curl -s "${LOCALHOST_IP}:79/rci/crypto/virtual-ip-server-ikev2")
+
+	# вероятное изменение настроек роутера
+	ikev2_setup "${ikev2_settings}"
+
+	local net_pool=$(echo "${ikev2_settings}" | grep -F -- 'pool-start' | cut -d':' -f2 | sed 's/[\,\" ]//g;')
+	ready "Добавление гостевого интерфейса \"VPN-сервер IKEv2\" [${net_pool}] завершено" && {
+		ip4__add_routing_by_list_for_net 'ikev2'
+
+		# сохранение в конфигурацию ПИВАС
+		add_ikev2_net_to_config
+	} && when_alert "УСПЕШНО" || when_bad "С ОШИБКОЙ"
+}
+
+bridge_vpn_access_add() {
+	guest_bridge_id=${1}
+
+	if [ -n "${guest_bridge_id}" ]; then
+		if echo "${guest_bridge_id}" | grep -iq ikev2 ; then
+			ikev2_net_access_add
+		else
+			bridge_access_add "${guest_bridge_id}"
+
+			if has_ssr_enable; then
+				ip4__add_routing_by_list_for_net "${guest_bridge_id}"
+			fi
+		fi
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#       Обертка вокруг функции добавления гостевых сетей к активному vpn
+#
+# ------------------------------------------------------------------------------------------
+cmd_bridge_vpn_access_add() {
+
+#       Если добавляем конкретный интерфейс
+	guest_bridge_id=''; bridge_inface_select guest_bridge_id add
+
+	if [ -n "${guest_bridge_id}" ]; then
+		bridge_vpn_access_add "${guest_bridge_id}"
+
+	#       перезапускаем DNS сервер новыми IP для прослушки на 53 порту
+		ready "Перезапускаем DNS сервер"
+		if cmd_adguardhome_status | grep -q "ВКЛЮЧЕН" ; then
+			/opt/etc/init.d/S99adguardhome restart &> /dev/null
+		else
+			/opt/etc/init.d/S56dnsmasq restart &> /dev/null
+		fi
+		[ $? = 0 ] && when_alert "УСПЕШНО" || when_bad "С ОШИБКОЙ"
+	fi
+}
+
+
+
+# ------------------------------------------------------------------------------------------
+#
+#       Функция подключает гостевую сеть к активному vpn
+#       $1 - переменная для записи ID гостевого моста в entware
+#
+# ------------------------------------------------------------------------------------------
+bridge_inface_select() {
+    action="${2}"
+    entware_list=$(cmd_bridge_vpn_access_list "${action}" skip)
+	echo "${action}" | grep -q "add" && act="добавления" || act="удаления"
+
+    if [ -n "${entware_list}" ]; then
+       	echo "Выберите гостевую сеть для ${act}:"
+      	print_line
+        echo "${entware_list}"
+        total=$(echo -e "${entware_list}" | wc -l)
+
+    	while true; do
+			print_line
+			echo -en "Выберите номер интерфейса [1-${total}, Q-выход]:  "
+			read -r num_inface
+			case "${num_inface}" in
+				[qQ]*) break ;;
+				[1-${total}]* )
+					print_line
+					if [ "${num_inface}" = 1 ] && echo "${entware_list}" | grep -iq ikev2 ; then
+						eval "${1}=ikev2" ;
+					else
+						net_ip=$(echo "${entware_list}" | sed -n "${num_inface}"'p' | sed 's/.*\[\([0-9]\{1,3\}.[0-9]\{1,3\}.[0-9]\{1,3\}.[0-9]\{1,3\}\)\].*/\1/')
+						eval "${1}=$(get_inface_by_ip ${net_ip})" ;
+					fi
+					break ;;
+				* ) print_line; error "Введите цифру от 1 до ${total}." nl ;;
+			esac
+    	done
+    else
+        warning "Гостевые интерфейсы для ${act} отсутствуют!"
+    fi
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Меняем текущий DNS в настройках ipset на новый
+#
+#	$1 - новый DNS
+#
+# ------------------------------------------------------------------------------------------
+ipset_dns_change() {
+	dns_new=${1};
+	if echo "${dns_new}" | grep -qE ':|#'; then
+		_dns_clear=$(echo "${dns_new}" | tr '#' ':' )
+		sed -i "s/@[a-zA-Z0-9:.]*/@${_dns_clear}/" "/opt/apps/pivas/bin/main/ipset_domain"
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Устанавливаем поддержку обработку субдоменнов (wildcard) для dnsmasq
+#
+# ------------------------------------------------------------------------------------------
+
+dnsmasq_install_wildcard_support(){
+	ready "Меняем dnsmasq на версию с поддержкой wildcard"
+	bin_path="/opt/apps/pivas/sbin/dnsmasq"
+	chmod -R +x "${bin_path}"
+	arch=$(grep "arch" /opt/etc/entware_release | cut -f2 -d"=")
+	case "${arch}" in
+		mips) cp ${bin_path}/mips /opt/sbin/dnsmasq 1> /dev/null 2> "${ERROR_LOG_FILE}";;
+		mipsel) cp ${bin_path}/mipsel /opt/sbin/dnsmasq 1> /dev/null 2> "${ERROR_LOG_FILE}";;
+		aarch64) cp ${bin_path}/aarch64 /opt/sbin/dnsmasq 1> /dev/null 2> "${ERROR_LOG_FILE}";;
+		*) 	when_bad "ОШИБКА"
+			mess="Неизвестная архитектура процессора: ${arch}!"
+			warning "${mess}"
+			log_in_file "ОШИБКА: ${mess}"
+			exit 1
+		;;
+	esac
+	ready_status "${?}" "Проблема при замене dnsmasq на версию с поддержкой wildcard"
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Устанавливаем dnsmasq в систему
+#
+#	$1 - наличие значения данной переменной говорит о том,
+#	что вызов данной функции был произведен при инсталляции пакета
+#
+# ------------------------------------------------------------------------------------------
+dnsmasq_install(){
+	is_install_stage="${1}"
+
+	if [ -f /opt/etc/init.d/K56dnsmasq ]; then
+		cp /opt/etc/init.d/K56dnsmasq /opt/etc/init.d/S56dnsmasq
+	else
+		if ! [ -f "/opt/etc/init.d/S56dnsmasq" ]; then
+			ready "Устанавливаем пакет dnsmasq..."
+			if ! [ -f /opt/etc/init.d/S56dnsmasq ]; then
+#				то в этом случае можем попытаться удалять или устанавливать пакеты
+				opkg update 1> /dev/null 2> "${ERROR_LOG_FILE}"
+				opkg remove dnsmasq-full --force-depends 1> /dev/null 2> "${ERROR_LOG_FILE}"
+				opkg install dnsmasq-full --force-maintainer 1> /dev/null 2> "${ERROR_LOG_FILE}"
+				when_error "${?}" "Ошибка при установке пакета dnsmasq"
+			fi
+		fi
+	fi
+	if /opt/etc/init.d/S56dnsmasq status | grep -q alive ; then
+		ready "Останавливаем сервис dnsmasq..."
+		/opt/etc/init.d/S56dnsmasq stop 1> /dev/null 2> "${ERROR_LOG_FILE}"
+		ready_status "${?}" "Невозможно остановить сервис dnsmasq"
+	fi
+
+	ready 'Заменяем файл конфигурации dnsmasq...   '
+	if [ -f "${DNSMASQ_CONFIG}" ]; then
+		config__backup_as_opkg_if_not_exist "${DNSMASQ_CONFIG}"
+
+		mv -f "${DNSMASQ_CONFIG}" "${DNSMASQ_CONFIG_BACKUP}" 1>/dev/null 2>"${ERROR_LOG_FILE}"
+	fi
+	cp '/opt/apps/pivas/etc/conf/dnsmasq.conf' "${DNSMASQ_CONFIG}" 1>/dev/null 2>"${ERROR_LOG_FILE}"
+	ready_status "${?}" 'Проблемы при замене в файле конфигурации dnsmasq'
+
+	# dnsmasq_install_wildcard_support
+
+	uplevel_dns=$(get_config_value DNS_DEFAULT)
+	local_ip=$(get_router_ip)
+	inface=$(get_inface_by_ip "${local_ip}")
+
+	ready "Настройка файлов конфигурации dnsmasq"
+	sed -i "s/@LOCAL_IP/${local_ip}/g; s/@INFACE/${inface}/g; s/@UPLEVEL_DNS/${uplevel_dns}/g;" /opt/etc/dnsmasq.conf 1> /dev/null 2> "${ERROR_LOG_FILE}"
+	ready_status "${?}" "Проблема при настройке файлов конфигурации dnsmasq"
+	# Если запуск функции был не при установке пакета Пивас
+	[ -z "${is_install_stage}" ] && cmd_pivas_init "no"
+
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Меняем текущий DNS на dnsmasq на новый
+#
+#	$1 - новый DNS
+#	$2 - команда перегрузки сервиса dnsmasq
+#		restart (по умолчанию) - перегружаем dnsmasq
+#		norestart - не перегружаем сервис
+#
+# ------------------------------------------------------------------------------------------
+dnsmasq_dns_change() {
+	dns_new=${1}; cmd=${2:-restart};
+	ready "Замена DNS на ${dns_new} в dnsmasq завершена"
+	sed -i "s/\(server=\).*/\1${dns_new}/"  "${DNSMASQ_CONFIG}"
+	ipset_dns_change "${dns_new}"
+	set_config_value DNS_DEFAULT "${dns_new}"
+	/opt/etc/init.d/S56dnsmasq restart &> /dev/null
+#	[ "${cmd}" = restart ] && cmd_update_list &> /dev/null
+	[ $? = 0 ] && when_alert "УСПЕШНО" || when_bad "С ОШИБКОЙ"
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Меняем текущий DNS на dnsmasq на новый
+#
+#	$1 - новый DNS
+#	$2 - команда перегрузки сервиса dnsmasq
+#		restart (по умолчанию) - перегружаем dnsmasq
+#		norestart - не перегружаем сервис
+#
+# ------------------------------------------------------------------------------------------
+cmd_dnsmasq_dns_change() {
+	exit_when_adguard_on status
+	if [ "${status}" != 0 ] ; then
+		return 1
+	fi
+
+	dns_new=${1}
+	if [ -z "${dns_new}" ] ; then
+		dns_show
+		return
+	fi
+
+	if ! echo "${dns_new}" | grep -qE "$(get_regexp_ip_with_or_without_port)" ; then
+		error "Параметр ${dns_new} не известен."
+		echo 'Можете передать любой IP с портом или без.'
+
+		return 2
+	fi
+
+	cmd=${2:-restart}
+	dnsmasq_dns_change "${dns_new}" "${cmd}"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Отображаем текущий IP, который слушает в dnsmasq
+#
+# ------------------------------------------------------------------------------------------
+cmd_dnsmasq_listen_show() {
+	exit_when_adguard_on status; [ "${status}" = 0 ] && {
+		ready "DNSMASQ слушает адрес:порт"
+		ip=$(get_config_value DNSMASQ_LISTEN_IP)
+		when_alert "${ip}:$(cmd_adguardhome_status)"
+	}
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Меняем текущий порт dnsmasq на новый
+#
+# 	$1 - новый номер порта
+#	$2 - команда перегрузки сервиса dnsmasq
+#		restart (по умолчанию) - перегружаем dnsmasq
+#		norestart - не перегружаем сервис
+#
+# ------------------------------------------------------------------------------------------
+cmd_dnsmasq_port_change() {
+
+	exit_when_adguard_on status; [ "${status}" = 0 ] && {
+
+		port=${1}; cmd=${2:-restart}
+		if [ -z "${port}" ]; then
+			cmd_dnsmasq_port_show
+		else
+			ready "Замена порта на ${port} в dnsmasq завершена"
+			sed -i "s/\(port=\).*/\1${port}/"  "${DNSMASQ_CONFIG}"
+			set_config_value DNSMASQ_PORT "${port}"
+			[ "${cmd}" = restart ] && cmd_pivas_init "no" &> /dev/null
+			[ $? = 0 ] && when_alert "УСПЕШНО" || when_bad "С ОШИБКОЙ"
+		fi
+	}
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Отображаем текущий порт, который слушает в dnsmasq
+#
+# ------------------------------------------------------------------------------------------
+cmd_dnsmasq_port_show() {
+	exit_when_adguard_on status; [ "${status}" = 0 ] && {
+
+		ready "DNSMASQ слушает порт"
+		port=$(get_config_value DNSMASQ_PORT)
+		when_alert "${port}"
+	}
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Отображаем текущий DNS, установленный в dnsmasq
+#
+# ------------------------------------------------------------------------------------------
+cmd_dns_test() {
+	local _domain=${1:-google.com}
+	ready "Тестируем получение адреса для домена ${_domain}"
+	result=$(test_host "${_domain}" ip)
+	[ -n "${result}" ] && when_alert "${result}" || when_bad "ПУСТО"
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Отображаем текущий DNS, установленный в dnsmasq
+#
+# ------------------------------------------------------------------------------------------
+dns_show() {
+	mess="Текущий DNS сервер по умолчанию"
+	if cmd_adguardhome_status | grep -qE "ВКЛЮЧЕН|ОТКЛЮЧЕН" ; then
+		DNS_IP_PORT=$(get_adguardhome_ip_port)
+	fi
+	dns=$(get_config_value DNS_DEFAULT)
+	dns_crypt=$(get_config_value DNS_CRYPT_PORT)
+	if  echo "${dns}" | grep -q "${dns_crypt}" ; then
+		mess="${mess} (dnscrypt_proxy2)"
+	elif echo "${dns}" | grep -q "${DNS_IP_PORT}" ; then
+		mess="${mess} (AdGuard Home)"
+	else
+		mess="${mess} (dnsmasq)"
+	fi
+	ready "${mess}"; when_alert "${dns}"
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	ВКЛючаем VPN клиента
+#	$1 - id интерфейса в entware
+#
+# ------------------------------------------------------------------------------------------
+vpn_off() {
+#	ready "Интерфейс vpn отключен "
+	[ -f "/opt/etc/ndm/netfilter.d/100-vpn-mark" ] && rm -f "/opt/etc/ndm/netfilter.d/100-vpn-mark"
+	[ -f /opt/etc/ndm/ifstatechanged.d/100-pivas-vpn ] && rm -f /opt/etc/ndm/ifstatechanged.d/100-pivas-vpn
+	[ -f /opt/etc/ndm/iflayerchanged.d/100-pivas-vpn ] && rm -f /opt/etc/ndm/iflayerchanged.d/100-pivas-vpn
+	ip4__flush 'chain table' &> /dev/null
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Отображаем статус VPN подключения (тип соединения и его состояние)
+#
+# ------------------------------------------------------------------------------------------
+cmd_vpn_status() {
+        vpn_cli_desc=$(get_current_vpn_interface "cli_desc")
+        vpn_cli=$(get_current_vpn_interface "cli")
+        [ "${vpn_cli}" = 'shadowsocks' ] && inface="SHADOWSOCKS" || inface="${vpn_cli_desc} (${vpn_cli})"
+        ready "Текущее VPN соединение: ${BLUE}${inface}${NOCL}"
+        [ "$(is_vpn_interface_connected "${vpn_cli}")" = 'on' ] && when_ok "ПОДКЛЮЧЕНО" || when_bad "ОТКЛЮЧЕНО"
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Производим замену в библиотеке ndm основных значения интерфейсов
+#	$1 - id интерфейса в entware
+#
+# ------------------------------------------------------------------------------------------
+ndm_interface_change() {
+	inface_entware="${1}"; inface_cli="${2}"
+
+	cp /opt/apps/${APP_NAME}/etc/ndm/ndm /opt/apps/pivas/bin/libs/ndm
+	chmod +x /opt/apps/pivas/bin/libs/ndm
+
+	# Очистим сетевые правила (кроме IPSet),
+	# пока нам ещё доступно "старое" соединение
+	ip4__flush 'chain table' &>/dev/null
+
+	set_config_value "INFACE_ENT" "${inface_entware}"
+	set_config_value "INFACE_CLI" "${inface_cli}"
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Устанавливаем в библиотеке ndm адрес шлюза
+#   $1 - адрес шлюза
+#
+# ------------------------------------------------------------------------------------------
+ndm_gateway_change() {
+	addr_man="${1}"
+	cp /opt/apps/${APP_NAME}/etc/ndm/ndm /opt/apps/pivas/bin/libs/ndm
+	chmod +x /opt/apps/pivas/bin/libs/ndm
+	set_config_value "ADDR_MAN" "${addr_man}"
+
+}
+# ------------------------------------------------------------------------------------------
+#
+#	ВКЛючаем VPN клиента
+#	$1 - id интерфейса в entware
+#
+# ------------------------------------------------------------------------------------------
+
+vpn_on() {
+
+	inface_entware="${1}"
+	inface_cli=$(grep "${inface_entware}" "${INFACE_NAMES_FILE}" | cut -d '|' -f1 )
+	inface_cli_desc=$(grep "${inface_entware}" "${INFACE_NAMES_FILE}" | cut -d '|' -f3 )
+
+	ready "Интерфейс ${inface_cli_desc} подключен "
+	{
+		# Производим замену в библиотеке ndm основных значения интерфейсов
+		ndm_interface_change "${inface_entware}" "${inface_cli}"
+
+		cp "/opt/apps/${APP_NAME}/etc/ndm/netfilter.d/100-vpn-mark" "/opt/etc/ndm/netfilter.d/100-vpn-mark"
+		chmod +x "/opt/etc/ndm/netfilter.d/100-vpn-mark"
+
+#		Если версия фирменной оболочки равно или больше 4.0,
+#		то применяем механизм iflayerchanged.d, если нет, то ifstatechanged.d
+		hook_dir=$(get_hook_dir)
+		cp "/opt/apps/${APP_NAME}/etc/ndm/${hook_dir}/100-pivas-vpn" "/opt/etc/ndm/${hook_dir}/100-pivas-vpn"
+		chmod +x "/opt/etc/ndm/${hook_dir}/100-pivas-vpn"
+
+		state=$(get_value_interface_field "${inface_cli}" state)
+
+		if [ "${state}" = 'down' ]; then
+			curl -s -d '{"up":"true"}' "${INFACE_PART_REQUEST}/${inface_cli}" &> /dev/null
+		fi
+		sleep 2
+#		connected=$(get_value_interface_field "${inface_cli}" connected)
+		connected=$(get_value_interface_field "${inface_cli}" state)
+
+#		if [ "${connected}" = 'no' ]; then
+		if [ "${connected}" = 'down' ]; then
+
+			when_bad "ОШИБКА"
+			error "Возникла ошибка при подключении интерфейса ${inface_entware}!"
+			error "Проверьте доступность сервера и настройки клиента!"
+			exit 1
+		else
+			update_iptables
+		fi
+	} 1> /dev/null 2> "${ERROR_LOG_FILE}"
+	ready_status "${?}" "Возникла ошибка при подключении VPN соединения [${inface_cli_desc}]" "УСПЕШНО"
+
+}
+
+active_backup_config(){
+	echo "Обнаружен архивный файл конфигурации shadowsocks."
+	answer=''; read_ynq_timer "Удалить его и создать новый" answer N 6
+	if [ "${answer}" = q ] ; then exit_q; print_line; exit 1; fi
+	if echo "${answer}" | grep -qi y ; then
+		ready "Удаляем архивный файл конфигурации shadowsocks..."
+		rm -f "${SHADOWSOCKS_CONF}.pivas"
+		[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+	else
+		ready "Восстанавливаем файл конфигурации shadowsocks из архива   "
+		cp "${SHADOWSOCKS_CONF}.pivas" "${SHADOWSOCKS_CONF}"  &>/dev/null
+		if [ ${?} = 0 ]; then
+			when_ok "УСПЕШНО";
+		else
+			when_bad "ОШИБКА" && exit 1
+		fi
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Сохраняем данные для shadowsocks в архивный файл ${SHADOWSOCKS_CONF}.pivas
+#
+# ------------------------------------------------------------------------------------------
+shadowsocks_backup() {
+	# Проверяем установлен ли сервис shadowsocks
+	if [ -f "${SSR_CMD}" ] && [ -f /opt/etc/init.d/S22shadowsocks ]; then
+		# меняем данные в файлах shadowsocks
+		sed -i 's/ss-local/ss-redir/g' /opt/etc/init.d/S22shadowsocks
+
+	#	Проверяем на наличие запуска сервиса shadowsocks
+		if /opt/etc/init.d/S22shadowsocks status | grep -q alive ; then
+			print_line
+			ready "Останавливаем сервис shadowsocks..."
+			if /opt/etc/init.d/S22shadowsocks stop &>/dev/null; then
+				when_ok "УСПЕШНО"
+			else
+				when_bad "ОШИБКА"
+				error "Невозможно остановить сервис shadowsocks"
+				exit 1
+			fi
+		fi
+		if [ -f "${SHADOWSOCKS_CONF}" ] ; then
+			grep -qE '""|@|127.0.0.1|barfoo!' "${SHADOWSOCKS_CONF}" && shadowsocks_read_data
+		else
+			if [ -f "${SHADOWSOCKS_CONF}.pivas" ] && grep -qvE '""|@|127.0.0.1|barfoo!' "${SHADOWSOCKS_CONF}" ; then
+				active_backup_config
+			else
+				shadowsocks_read_data
+			fi
+		fi
+	else
+		error "Shadowsocks сервис не установлен. Дальнейшая установка невозможна."
+		exit 1;
+	fi
+}
+
+
+get_ssr_entware_interface()(ip4 a | grep "${SSR_ENTWARE_TEMPL}" | head -1 | cut -d': ' -f2 | tr -d ' ')
+
+
+shadowsocks_read_config(){
+
+	SSR_SERVER_IP=""; SSR_SERVER_PORT=""; SSR_SERVER_CRYPT=""; SSR_SERVER_PASSWD=""
+
+	read_value "Ведите доменное имя или IP адрес сервера:" SSR_SERVER_IP
+	[ "${SSR_SERVER_IP}" = q ] && exit 1
+	read_value "Ведите порт сервера:" SSR_SERVER_PORT 'digit'
+	[ "${SSR_SERVER_PORT}" = q ] && exit 1
+	read_value "Ведите метод шифрования на стороне сервера:" SSR_SERVER_CRYPT
+	[ "${SSR_SERVER_CRYPT}" = q ] && exit 1
+	read_value "Ведите пароль сервера:" SSR_SERVER_PASSWD 'password'
+	[ "${SSR_SERVER_PASSWD}" = q ] && exit 1
+	echo
+
+	# Экранируем символы для применения в sed
+	ESCAPED_PASSWD=$(escape_sed "$SSR_SERVER_PASSWD")
+	if [ -f "${SHADOWSOCKS_CONF}" ] ; then
+		print_line
+		ready "Изменяем конфигурацию ${SHADOWSOCKS_CONF}..."
+		sed -i "s/\(\"server\":\).*/\1 \"${SSR_SERVER_IP}\",/; 			\
+				s/\(\"server_port\":\).*/\1 ${SSR_SERVER_PORT},/; 		\
+				s/\(\"local_port\":\).*/\1 $(get_config_value SSR_DNS_PORT),/; 		\
+				s/\(\"password\":\).*/\1 \"${ESCAPED_PASSWD}\",/; 	\
+				s/\(\"method\":\).*/\1 \"${SSR_SERVER_CRYPT}\",/;" 		\
+			"${SHADOWSOCKS_CONF}" &>/dev/null && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+	else
+		print_line
+		error "Не обнаружен файл ${SHADOWSOCKS_CONF}." nl
+		print_line
+		exit 0
+	fi
+}
+
+shadowsocks_config_check(){
+	ssr_run 2>/dev/null &
+	id=$(ps -w | grep "-c ${SHADOWSOCKS_CONF}" | grep -v grep | cut -d' ' -f1)
+	if [ -n "${id}" ] ; then
+		kill -9 "${id}"
+	else
+		error "Обнаружены ошибки в файле конфигурации ${SHADOWSOCKS_CONF}" nl
+		print_line
+		ssr_run 
+		print_line
+		exit 0
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Меняем данные для shadowsocks соединения
+#
+# ------------------------------------------------------------------------------------------
+cmd_shadowsocks_read_new_data() {
+
+	echo "Для смены shadowsocks сервера необходимо ввести следующие данные:"
+	echo -e "${GREEN}Хост или IP${NOCL} shadowsocks сервера, его ${GREEN}порт, пароль доступа${NOCL} и ${GREEN}метод шифрования${NOCL}"
+
+	echo -e "${BLUE}Пожалуйста, последовательно введите эти данные ниже.${NOCL}"
+	print_line
+
+	shadowsocks_read_data
+	ndm_interface_change "$(get_ssr_entware_interface)" "shadowsocks"
+	shadowsocks_config_check &>/dev/null
+	service_restart  shadowsocks S22shadowsocks
+
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Отключаем shadowsocks клиента
+#
+# ------------------------------------------------------------------------------------------
+shadowsocks_read_data() {
+	if [ -f "${SHADOWSOCKS_CONF}" ]; then
+		config__backup_as_opkg_if_not_exist "${SHADOWSOCKS_CONF}"
+	fi
+	cp -f "/opt/apps/${APP_NAME}/etc/conf/shadowsocks.json" "${SHADOWSOCKS_CONF}"
+
+	answer=''; read_ynq "У Вас имеется кодированная ss:// ссылка для ввода данных" answer
+	if [ "${answer}" = q ] ; then exit_q; print_line; exit 1; fi
+
+	if echo "${answer}" | grep -qi y ; then
+		shadowsocks_read_link
+	else
+
+		echo "Чтобы продолжить работу необходимо ввести следующие данные:"
+		echo -e "${GREEN}Хост${NOCL} сервера, его ${GREEN}порт, пароль доступа${NOCL} и ${GREEN}метод шифрования${NOCL}"
+
+		echo -e "${BLUE}Пожалуйста, последовательно введите эти данные ниже.${NOCL}"
+		print_line
+
+		shadowsocks_read_config
+	fi
+
+	
+}
+
+shadowsocks_read_link(){
+
+
+	SSR_LINK=""; SSR_SERVER_IP=""; SSR_SERVER_PORT=""; SSR_SERVER_CRYPT=""; SSR_SERVER_PASSWD=""
+
+	read_value "Ведите кодированную ссылку в формате ss://:" SSR_LINK
+	[ "${SSR_LINK}" = q ] && exit 1
+
+	if [[ -n "${SSR_LINK}" && "${#SSR_LINK}" -gt 6 ]] ; then
+		SSR_LINK="$(echo "${SSR_LINK}" | sed -E 's/(.*)[#?\/]\?.*|(.*)#.*/\1\2/')"
+		# password=$(echo "${SSR_LINK}" | grep -oP "(?<=ss://).*?(?=@)" | base64 -d )
+		password=$(echo "${SSR_LINK}" | awk -F'[/:@]' '{print $(NF-2)}' | base64 -d )
+		
+		if echo "${password}" | grep -q ":" ; then 
+			SSR_SERVER_PASSWD=$(echo "${password}" | cut -d ":" -f 2) 
+		else 
+			SSR_SERVER_PASSWD="${password}"
+		fi
+		SSR_SERVER_CRYPT=$(echo "${password}" | cut -d ":" -f 1)
+		SSR_SERVER_IP=$(echo "${SSR_LINK}" | grep -oP "(?<=@).*?(?=:)")
+		SSR_SERVER_PORT=$(echo "${SSR_LINK}" | sed 's/.*@.*:\([0-9]\{1,6\}\).*/\1/')
+	else
+		error "Ссылка пуста или слишком коротка! Введите корректную ссылку!"  nl
+		exit 1
+	fi
+	
+	if [ -z "${SSR_SERVER_PASSWD}" ] || [ -z "${SSR_SERVER_CRYPT}" ] || [ -z "${SSR_SERVER_IP}" ] || [ -z "${SSR_SERVER_PORT}" ] ; then
+		error "Извлеченные данные не корректны! Введите ссылку с корректными данными!"  nl
+		exit 1
+	else
+
+		if [ -f "${SHADOWSOCKS_CONF}" ] ; then
+			# Экранируем символы для применения в sed
+			ESCAPED_PASSWD=$(escape_sed "$SSR_SERVER_PASSWD")
+			print_line
+			ready "Изменяем конфигурацию ${SHADOWSOCKS_CONF}..."
+			sed -i "s/\(\"server\":\).*/\1 \"${SSR_SERVER_IP}\",/; 			\
+					s/\(\"server_port\":\).*/\1 ${SSR_SERVER_PORT},/; 		\
+					s/\(\"local_port\":\).*/\1 $(get_config_value SSR_DNS_PORT),/; 		\
+					s/\(\"password\":\).*/\1 \"${ESCAPED_PASSWD}\",/; 	\
+					s/\(\"method\":\).*/\1 \"${SSR_SERVER_CRYPT}\",/;" 		\
+				"${SHADOWSOCKS_CONF}" &>/dev/null && when_ok "УСПЕШНО" || when_bad "C ОШИБКАМИ"
+		else
+			print_line
+			error "Не обнаружен файл ${SHADOWSOCKS_CONF}." nl
+			print_line
+			exit 0
+		fi
+	fi
+}
+
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Чистим таблицу правил iptables для shadowsocks подключений
+#
+# ------------------------------------------------------------------------------------------
+cmd_shadowsocks_iptable_flush() {
+	if [ -f /opt/apps/pivas/bin/libs/ndm ]; then
+		ready "Удаление правил iptables для shadowsocks завершено"
+		# возможно чистить цепочки и роутинг — лишнее
+		ip4__flush 'chain table' &>/dev/null
+		[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "C ОШИБКАМИ"
+	fi
+
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Переустанавливаем правила в itables для shadowsocks клиента
+#
+# ------------------------------------------------------------------------------------------
+
+cmd_shadowsocks_iptable_reset() {
+
+	ready "Переустановка iptables для shadowsocks завершена"
+	if [ -f /opt/apps/pivas/bin/libs/ndm ]; then
+		local_ip=$(get_router_ip)
+		inface=$(get_inface_by_ip "${local_ip}")
+		proxy_port=$(get_config_value SSR_DNS_PORT)
+
+		update_iptables
+	else
+		exit 1
+	fi
+	[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "C ОШИБКАМИ"
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Отключаем shadowsocks клиента
+#
+# ------------------------------------------------------------------------------------------
+shadowsocks_off() {
+	ready "Интерфейс shadowsocks отключен "
+	#	сохраняем файл конфигурации shadowsocks
+	/opt/etc/init.d/S22shadowsocks stop &> /dev/null
+	[ -f "${SHADOWSOCKS_CONF}" ] || mv -f "${SHADOWSOCKS_CONF}" "${SHADOWSOCKS_CONF}.pivas" &> /dev/null
+	rm -f "/opt/etc/ndm/netfilter.d/100-proxy-redirect"
+	cmd_shadowsocks_iptable_flush &> /dev/null
+	[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "C ОШИБКАМИ"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Меняем текущий локальный порт на shadowsocks на новый
+#
+#	$1 - новый порт
+#	$2 - команда перегрузки сервиса dnsmasq
+#		restart (по умолчанию) - перегружаем dnsmasq
+#		norestart - не перегружаем сервис
+#
+# ------------------------------------------------------------------------------------------
+cmd_shadowsocks_local_port_change() {
+	if has_ssr_enable ; then
+
+		port_new=${1}; cmd=${2:-restart}
+		if [ -n "${port_new}" ]	; then
+
+			ready "Замена порта на ${port_new} в shadowsocks завершена"
+
+#			sed -i "s/\(--to-port\).*/\1 ${port_new}/g" "/opt/etc/ndm/netfilter.d/100-proxy-redirect"
+			sed -i "s/\(local_port\":\).*/\1 ${port_new}/g" "${SHADOWSOCKS_CONF}"
+
+			set_config_value SSR_DNS_PORT "${port_new}"
+			cmd_shadowsocks_iptable_reset &> /dev/null
+
+			[ "${cmd}" = restart ] && /opt/etc/init.d/S22shadowsocks restart &> /dev/null
+			[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "C ОШИБКАМИ"
+		else
+			ready "Текущий номер порта shadowsocks соединения:"
+			when_ok "$(get_config_value SSR_DNS_PORT)"
+		fi
+	else
+		answer=''
+		error "shadowsocks клиент не выбран в настройках"
+		read_ynq_timer "Включить его вместо текущего соединения" answer Y 6
+		if [ "${answer}" = q ] ; then exit_q; print_line; exit 1; fi
+		echo "${answer}" | grep -qi y && shadowsocks_on; cmd_shadowsocks_local_port_change "${port_new}"
+	fi
+}
+
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Отключаем shadowsocks клиента
+#
+# ------------------------------------------------------------------------------------------
+shadowsocks_on() {
+
+	local_ip=$(get_router_ip)
+	inface=$(get_inface_by_ip "${local_ip}")
+
+	#	настройка файла 100-proxy-redirect
+	cp "/opt/apps/${APP_NAME}/etc/ndm/netfilter.d/100-proxy-redirect" "/opt/etc/ndm/netfilter.d/100-proxy-redirect"
+	chmod +x "/opt/etc/ndm/netfilter.d/100-proxy-redirect"
+
+	ndm_interface_change "$(get_ssr_entware_interface)" "shadowsocks"
+
+	cmd_shadowsocks_iptable_reset  &> /dev/null
+	#   настройка S22shadowsocks конфигурации
+	if [ -f "${SHADOWSOCKS_CONF}" ] ; then
+		if grep -qE '""|@' "${SHADOWSOCKS_CONF}" || grep -qE '127.0.0.1|barfoo!' "${SHADOWSOCKS_CONF}"; then
+			print_line
+			shadowsocks_read_data
+		fi
+	else
+		if [ -f "${SHADOWSOCKS_CONF_BACKUP}" ] ; then
+			if grep -qE '""|@' "${SHADOWSOCKS_CONF_BACKUP}" || grep -qE '127.0.0.1|barfoo!' "${SHADOWSOCKS_CONF_BACKUP}"; then
+				error "Архивный файл содержит некорректные данные!"
+				print_line
+				shadowsocks_read_data
+			else
+				ready "Используем данные"
+				cp "${SHADOWSOCKS_CONF_BACKUP}" "${SHADOWSOCKS_CONF}"
+				when_alert "ИЗ АРХИВА"
+			fi
+
+		else
+			print_line
+			shadowsocks_read_data
+		fi
+	fi
+
+	# меняем данные в файлах shadowsocks
+	sed -i 's/ss-local/ss-redir/g' "/opt/etc/init.d/S22shadowsocks"
+	
+	#	включаем shadowsocks службу
+	print_line
+	ready "Запускаем сервис shadowsocks..."
+	/opt/etc/init.d/S22shadowsocks restart &> /dev/null
+	/opt/etc/init.d/S22shadowsocks status &> /dev/null
+	if [ $? = 0 ]; then
+		when_ok "УСПЕШНО"
+	else
+		when_bad "ОШИБКА"
+		error "Возникла ошибка при подключении shadowsocks интерфейса!"
+		error "Проверьте доступность сервера и настройки клиента!"
+		exit 1
+	fi
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем нумерованный список с именами интерфейсов
+#
+# ------------------------------------------------------------------------------------------
+update_interface_name_list() {
+
+	warning "Производим сканирование интерфейсов!"
+	#warning "Это займет время."
+	warning "Сохраняйте терпение и спокойствие!"
+	print_line
+
+	HOOK_INFACE_FILE=/opt/etc/ndm/$(get_hook_dir)/100-save-inface_entware
+	rm -f "${INFACE_NAMES_FILE}"
+	touch "${INFACE_NAMES_FILE}"
+	# если нет файла по отлавливанию хука
+	if ! [ -f "${HOOK_INFACE_FILE}" ]; then
+		#	создаем файл
+		cat <<EOF >"${HOOK_INFACE_FILE}"
+#!/bin/sh
+if [ -z "\$(grep "\${id}" "${INFACE_NAMES_FILE}")" ]; then
+	echo "\${id}|\${system_name}" >> "${INFACE_NAMES_FILE}"
+fi
+exit 0
+EOF
+		chmod +x "${HOOK_INFACE_FILE}"
+	fi
+	# очищаем файл с именами интерфейсов
+	echo "shadowsocks|$(get_ssr_entware_interface)|shadowsocks" > "${INFACE_NAMES_FILE}"
+	# обозначаем список типов обрабатываемых VPN интерфейсов
+	types_inface_included='"OpenVPN","Wireguard","IKE","SSTP","PPPOE","L2TP","PPTP","Proxy", "OpenConnect" '
+#	архивный вариант с выключенными интерфейсами сотовых операторов
+#	types_inface='"OpenVPN","Wireguard","IKE","SSTP","PPPOE","L2TP","CdcEthernet","UsbLte"'
+	# получаем список ID интерфейсов в наличии на роутере через пробел
+	inface_list=$(
+		curl -s "${INFACE_REQUEST}" \
+			| jq -r '.[] | select([.type]| inside(['"${types_inface_included}"'])) | select(.defaultgw!=true) | .id' \
+			| tr '\n' ' ' | sed 's/[ ]$//g' \
+	)
+	# проходимся по каждому интерфейсу
+	# ВНИМАНИЕ! inface_list - все маленькими буквами!!!
+
+	delay=3
+	for inface_cli in ${inface_list}; do
+		# переподключаем текущее соединение
+		reset_connection "${inface_cli}" "${delay}"
+	done
+	for inface_cli in ${inface_list}; do
+		# максимальное количество попыток (секунд) для ожидания отработки хука
+		# если при ежесекундной проверке интерфейс в файле появится, то ожидание прервётся
+		# если он уже на месте, задержки не будет
+		attempt=15
+		while [[ $attempt -gt 0 ]] && ! $(grep -Fq "${inface_cli}" "${INFACE_NAMES_FILE}"); do
+			sleep 3
+			attempt=$(( $attempt - 1 ))
+		done
+
+		if [[ $attempt -gt 0 ]]; then
+			# получаем описание интерфейса
+			description=$(get_value_interface_field "${inface_cli}" description | sed 's|\/|\\/|g')
+
+			# Ищем интерфейс PROXY_VLESS_NAME в списке и обновляем его описание 
+			# данное имя (PROXY_VLESS_NAME) дается интерфейсу при его создании и оно уникально, чтобы не спутать его с другими Proxy
+			[[ "${inface_cli}" == "${PROXY_VLESS_NAME}" ]] && description="${description} [vless]"
+
+			# вставляем описание в файл /opt/etc/inface_equals
+			[ -n "${description}" ] && \
+				sed -i 's/\('"${inface_cli}"'.*\)/\1|'"${description}"'/' "${INFACE_NAMES_FILE}"
+		else
+			log_error "Сетевой интерфейс для ${inface_cli} получить не удалось."
+		fi
+	done
+	rm -f "${HOOK_INFACE_FILE}"
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем нумерованный список с именами интерфейсов для командой строки
+#
+# ------------------------------------------------------------------------------------------
+cmd_scan_interface_list() {
+	update_interface_name_list
+	warning "Сканирование интерфейсов завершено:";
+	print_line
+	show_vpn_list
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем название интерфейса по номеру в списке в файле INFACE_NAMES_FILE
+# 	$1 - номер строки в файле
+#	$2 - тип возвращаемых данных
+#		cli - id интерфейсов в CLI
+#		entware (по умолчанию) - id интерфейсов в entware
+#
+# ------------------------------------------------------------------------------------------
+get_vpn_interface_by_num() {
+	number="${1}"
+	type_data=${2:-entware}
+
+	if [ "${type_data}" = entware ]; then _type=2; else _type=1; fi
+	cat < "${INFACE_NAMES_FILE}" | sed -n "${number}"'p' | cut -d'|' -f"${_type}"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем название текущего интерфейса
+# 	$1 - тип интерфейса допустимы entware, cli, cli_desc
+#
+# ------------------------------------------------------------------------------------------
+get_current_vpn_interface() {
+	local type="${1}"
+	local inface=""
+	if has_ssr_enable; then
+		inface='shadowsocks'
+	else
+		case "${type}" in
+			entware) col=2 ;;
+			cli) col=1 ;;
+			cli_desc) col=3 ;;
+			*) col=1 ;;
+		esac
+		inface_entware=$(get_config_value "INFACE_ENT")
+		[ -n "${inface_entware}" ] && inface=$(grep "${inface_entware}" "${INFACE_NAMES_FILE}" | cut -d'|' -f"${col}")
+	fi
+	echo "${inface}"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Переключаем интерфейс клиента
+#	$1 - id интерфейса в cli
+#
+# ------------------------------------------------------------------------------------------
+is_vpn_interface_connected() {
+	if [ -z "${1}" ] ; then
+		error "[${FUNCNAME}] Не передан обязательный параметр — Keenetic-имя"
+		return
+	fi
+	local keenetic_name="${1}"
+
+	if is_interface_online "${keenetic_name}"; then 
+		echo 'on'
+	else
+		echo 'off'
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Выводим список текущих интерфейсов с номерами по порядку и данными об их доступности
+#
+# ------------------------------------------------------------------------------------------
+show_vpn_list() {
+	# Удаляем интерфейсы без человеческого имени
+	sed -i '/|$/d;/|""$/d' "${INFACE_NAMES_FILE}"
+
+# set -xeu
+	inface_entware=$(get_current_vpn_interface 'entware')
+	num=0;
+
+	while read -r line || [ -n "${line}" ]; do
+		num=$((num + 1))
+
+		is_current_vpn=$(echo "${line}" | grep -i "${inface_entware}")
+		cli_inface_desc=$(echo "${line}" | cut -d'|' -f3 | xargs)
+		if [ -z "${cli_inface_desc}" ]; then
+			cli_inface_desc='системный, для устранения вызовите pivas vpn rescan'
+		fi
+		cli_inface=$(echo "${line}" | cut -d"|" -f1)
+		ent_inface=$(echo "${line}" | cut -d"|" -f2)
+		net_ip=$(get_ip_by_inface "${ent_inface}")
+		[ -n "${net_ip}" ] && net_ip=" [${net_ip}]"
+		mess="${num}. ${cli_inface_desc}${net_ip}"
+		sleep 1
+		connected=$(is_vpn_interface_connected "${cli_inface}")
+
+		if [ -n "${inface_entware}" ] && [ -n "${is_current_vpn}" ]; then
+			mess="${BLUE}${mess} текущий${NOCL}"
+		fi
+
+		ready "${mess}"
+		if [ "${connected}" = "on" ]; then when_ok "В СЕТИ"; else when_bad "ОТКЛЮЧЕН"; fi
+	done <${INFACE_NAMES_FILE}
+# set +xeu
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Отображаем диалог обновления списка интерфейсов с запросом
+#   $1  - ask - делаем запросы на ввод данные ,
+#
+# ------------------------------------------------------------------------------------------
+show_interface_name_list_process(){
+
+#	[ -f "${INFACE_NAMES_FILE}" ] || update_interface_name_list
+	local answer="${1}"
+	local _ans
+
+	if [ "${answer}" = yes ] ; then
+		update_interface_name_list
+
+	elif [ -f "${INFACE_NAMES_FILE}" ]; then
+		if [ "${answer}" = ask ] ; then
+			read_ynq_timer "Обновить список интерфейсов" _ans N
+			if [ "${_ans}" = q ] ; then exit_q; print_line; exit 1; fi
+			print_line
+			if echo "${_ans}" | grep -qi y ; then
+				update_interface_name_list
+			fi			
+		fi
+	else
+		update_interface_name_list
+	fi
+}
+
+#------------------------------------------------------------------------------------------
+
+#------------------------------------------------------------------------------------------
+cmd_manual_gateway_set() {
+
+		local _ip=${1}
+
+		[ -z "${_ip}" ] && {
+			echo -en "${BLUE}Введите адрес шлюза :${NOCL} "
+			read -r addr_gateway 
+		}
+		
+		echo "${addr_gateway}" | grep -qE "${IP_FILTER}" || { 
+			error "Введен неправильный адрес шлюза!"; 
+			exit 1; 
+		}
+
+		local _inface_gateway=$(/opt/sbin/ip a | grep "${addr_gateway}" | sed 's/.* \(.*\)$/\1/')
+		
+		[ -z "${_inface_gateway}" ] && { 
+			error "Не удалось найти интерфейс с данным адресом. Проверьте правильность ввода адреса шлюза!"; 
+			exit 1; 
+		}
+
+		if [[ "$addr_gateway" =~ ^[Qq]$ ]] || [[ "$_inface_gateway" =~ ^[Qq]$ ]]; then
+			print_line
+#			Если нажали на q
+			echo -e "${RED}Процедура настройки прервана пользователем!${NOCL}"
+			print_line
+		else
+			ndm_gateway_change ${addr_gateway}
+			switch_vpn_on "${_inface_gateway}" "Gateway"
+			cmd_pivas_init "update"
+		fi
+
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Переключаем интерфейс клиента
+#   $1  - ask - делаем запросы на ввод данные ,
+#   	  no - список интерфейсов не обновляем
+#
+# ------------------------------------------------------------------------------------------
+cmd_interface_change() {
+
+	answer="${1:-no}"
+	is_install_stage="${2:-no}"
+    
+		show_interface_name_list_process "${answer}"
+        #	Отображаем список текущих интерфейсов с номерами по порядку и данными об их доступности
+		select_vpn_interface "${is_install_stage}"
+	
+}
+
+
+create_vless_config(){
+	local vless_link=''
+	read_value "Ведите ссылку в формате 'vless://[данные]' :" vless_link
+	[ -f "${VLESS_CONFIG_FILE}" ] || cp "${VLESS_CONFIG_ORIGINAL_FILE}" "${VLESS_CONFIG_FILE}" 
+	# Считываем данные из ссылки в файл proxy vless конфигурации.
+	# vless_link_parse сам зеркалит незаполненный слот (slot-2 ← slot-1).
+	vless_link_parse "${vless_link}" "${VLESS_CONFIG_FILE}"
+	print_line
+}
+
+start_vless(){
+	local _inface_entware=${1}
+	# Если нет файла конфигурации proxy vless
+	# то запросим ссылку и создаем его
+	[ -f ${VLESS_CONFIG_FILE} ] || create_vless_config
+	# Один заполненный слот + плейсхолдеры во втором — не спрашиваем ссылку
+	# повторно, а клонируем рабочий outbound. Иначе xray падает на
+	# unknown transport protocol: @SLOT2_NETWORK.
+	_vless_ensure_placeholder_slots_mirrored "${VLESS_CONFIG_FILE}"
+	grep -qE '@SLOT[12]_|@VLESS_' ${VLESS_CONFIG_FILE} && create_vless_config
+	_vless_ensure_placeholder_slots_mirrored "${VLESS_CONFIG_FILE}"
+	
+	# Проверка конфигурации xray
+	check_xray_config=$(${XRAY} run -test -c ${VLESS_CONFIG_FILE})
+
+	if echo "${check_xray_config}" | grep -q "Configuration OK" ; then
+
+		# Запуск xray в случае, если конфигурация xray не содержит ошибок
+		ready "Запускаем xray сервис..."
+		service_action "$(basename "${XRAY_INIT:-S24xray}")" start && when_ok "УСПЕШНО" 
+		vpn_on "${_inface_entware}" &> /dev/null
+		# Тестируем работу proxy vless
+		test_vless_proxy "${_inface_entware}"
+		
+
+	else
+		# В случае, если есть ошибки в файле конфигурации, выводим их в консоль
+		echo -e "${BLUE}В файле ${VLESS_CONFIG_FILE} обнаружены следующие ошибки:${NOCL}"
+		print_line
+		echo -e "${RED}${check_xray_config}${NOCL}"
+		exit 1
+	fi
+}
+
+switch_vpn_on(){
+#	entware интерфейс
+	inface_entware=${1}
+	cli_inface=${2}
+#	Меняем интерфейс в файле ndm
+	ndm_interface_change "${inface_entware}" "${cli_inface}"
+	
+	# Останавливаем xray, если запушен	
+	${XRAY_INIT} stop &> /dev/null
+
+	if [[ "${inface_entware}" =~ ${SSR_ENTWARE_TEMPL} ]]; then
+		vpn_off &> /dev/null
+		shadowsocks_backup
+		shadowsocks_on
+
+	else
+		shadowsocks_off &> /dev/null
+		
+		# Если выбран proxy vless pivas интерфейс
+		if [ "${cli_inface}" = "${PROXY_VLESS_NAME}" ] ; then
+			start_vless "${inface_entware}"
+		else
+			# Если выбран другой VPN интерфейс 
+			vpn_on "${inface_entware}"
+		fi
+	fi
+	[ "${is_install_stage}" = no ] && cmd_pivas_init "no" &> /dev/null
+
+	#------------------------------------------------------
+	# Если есть подключенные гостевые сети
+	#------------------------------------------------------
+	interfaces_list=$(get_guest_inface_list_from_config)
+	[ -n "${interfaces_list}" ] && {
+
+		printf '%s\n' "${interfaces_list}" |
+        while IFS= read -r iface ; do
+#			ready "Подключаем гостевые сети к выбранному VPN подключению..."
+			bridge_vpn_access_add "${iface}" #&>/dev/null && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+		done
+	}
+
+	[ -f /opt/etc/cron.5mins/check_vpn ] || {
+		ready "Устанавливаем проверку зависания VPN соединения в cron."
+		ln -s /opt/apps/pivas/bin/main/check_vpn /opt/etc/cron.5mins/check_vpn && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+	}
+
+
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Переключаем интерфейс клиента
+#   $1  - ask - делаем запросы на ввод данные ,
+#   	  no - список интерфейсов не обновляем
+#
+# ------------------------------------------------------------------------------------------
+select_vpn_interface() {
+
+	is_install_stage="${1:-no}"
+
+	warning "Выберите VPN интерфейс для работы пакета"
+	print_line
+#	Отображаем список текущих интерфейсов с номерами по порядку и данными об их доступности
+	show_vpn_list
+
+	total=$(cat < "${INFACE_NAMES_FILE}" | wc -l)
+	while true; do
+		print_line
+		echo -en "${BLUE}Выберите номер варианта VPN соединения 1 - ${total} | S-скан. | Q-выход:${NOCL} "
+		read -r num_vpn_inface
+		if [[ "$num_vpn_inface" =~ ^[\-]?[0-9]+$ ]]; then
+			print_line
+			set_config_value "ADDR_MAN" ""
+			if [[ "$num_vpn_inface" -ge 1 && "$num_vpn_inface" -le "$total" ]]; then
+# set -x
+	#			Если выбрали уже интерфейс
+		#		Меняем интерфейс в файле ndm
+				inface_entware=$(get_vpn_interface_by_num "${num_vpn_inface}")
+				cli_inface=$(grep "${inface_entware}" "${INFACE_NAMES_FILE}" | cut -d"|" -f1)
+				switch_vpn_on "${inface_entware}" "${cli_inface}"
+
+			else
+				error "Число должно быть в пределах от 1 до ${total}"
+				continue
+			fi
+		elif [[ "$num_vpn_inface" =~ ^[Qq]$ ]]; then
+			print_line
+#			Если нажали на q
+			echo -e "${RED}Процедура настройки прервана пользователем!${NOCL}"
+			print_line
+#			если интернет отключен, то выдаем сообщение
+			if curl -s "http://localhost:79/rci/show/interface" | \
+				jq -r '.[] | select(.id=="'"$(get_defaultgw_id)"'" and .state=="up" and .link=="up") | .connected' | grep -qv 'yes' ; then
+
+				if cmd_adguardhome_status | grep -q ВКЛЮЧЕН ; then
+					/opt/etc/init.d/S56dnsmasq stop  &> /dev/null
+				else
+					"${ADGUARDHOME_DEMON}" stop &> /dev/null
+				fi
+				cli="$(get_router_host)/a"
+				echo -e "${RED}К сожалению, у Вас пропал интернет. ${NOCL}"
+				echo -e "${RED}Проверьте основное подключение к провайдеру. ${NOCL}"
+				print_line
+				echo "Если ничего не помогает, то для восстановления подключения"
+				echo -e "необходимо зайти в админ панель роутера по адресу: ${GREEN}${cli}${NOCL}"
+				echo "и выполнить последовательно три следующих команды: "
+				print_line
+				echo -e "1. ${GREEN}no opkg dns-override ${NOCL}       - вновь подключаем DNS провайдера,"
+				echo -e "2. ${GREEN}system configuration save ${NOCL}  - сохраняем изменения,"
+				echo -e "3. ${GREEN}system reboot ${NOCL}              - перегружаем роутер."
+				print_line
+				exit 1
+			fi
+			exit
+		elif [[ "$num_vpn_inface" =~ ^[Ss]$ ]]; then
+			print_line
+			cmd_interface_change "yes" "${is_install_stage}"
+		else
+			error "Введите цифру 1-${total} или S - сканирование, Q - выход."
+			continue
+		fi
+		break
+	done
+
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Обновляем маршруты и таблицы ipset...
+#
+# ------------------------------------------------------------------------------------------
+cmd_update_list() {
+	ready "Обновляем маршруты и таблицы ipset..."
+	"${UPDATE_BIN_FILE}" miss_ads &> /dev/null
+	[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Меняем текущий порт dnscrypt_proxy2 на новый
+#
+#	$1 - новый номер порта
+#	$2 - команда перегрузки сервиса dnsmasq
+#		restart (по умолчанию) - перегружаем dnsmasq
+#		norestart - не перегружаем сервис
+#
+# ------------------------------------------------------------------------------------------
+dns_crypt_port_change() {
+
+	port_new=${1}; cmd=${2:-restart}
+	ready "Замена локального порта на ${port_new} в dnscrypt_proxy2 завершена"
+
+	set_config_value DNS_CRYPT_PORT "${port_new}"
+	sed -i "s/\(^listen_addresses.=.\).*$/\1['127.0.0.1:${port_new}']/g" "${DNSCRYPT_CONFIG}" &> /dev/null
+	sed -i "s/\(@.*\)\(:[0-9]\{2,6\}\)/\1:${port_new} /g" '/opt/apps/pivas/bin/main/ipset_domain' &> /dev/null
+
+	[ -f /opt/apps/pivas/bin/main/dnsmasq ] && {
+		# server_crypt_1="echo \"server=\/\${host}\/${LOCALHOST_IP}#${port_new}\" >> \/opt\/etc\/dnsmasq.d\/pivas.dnsmasq"
+		sed -i '/echo \"server=/d' '/opt/apps/pivas/bin/main/dnsmasq' &> /dev/null
+		sed -i '/^$/N;/^\n$/D' /opt/apps/pivas/bin/main/dnsmasq
+		# sed -i "s/\(echo \"ipset=\/\$.*\)/\1\n\t${server_crypt_1}/" '/opt/apps/pivas/bin/main/dnsmasq' &> /dev/null
+	}
+
+
+	if [ "${cmd}" = restart ]; then
+		cmd_dnsmasq_dns_change "${LOCALHOST_IP}#${port_new}" restart &> /dev/null
+		if ! [ -f /opt/etc/init.d/S09dnscrypt-proxy2 ]; then
+			if [ -f "${PIVAS_BACKUP_PATH}/S09dnscrypt-proxy2" ]; then
+				cp "${PIVAS_BACKUP_PATH}/S09dnscrypt-proxy2" /opt/etc/init.d/S09dnscrypt-proxy2
+			else
+				error "Нарушена работа пакета, файл /opt/etc/init.d/S09dnscrypt-proxy2 отсутствует"
+				exit 1
+			fi
+		fi
+		/opt/etc/init.d/S09dnscrypt-proxy2 restart &> /dev/null
+	else
+		cmd_dnsmasq_dns_change "${LOCALHOST_IP}#${port_new}" &> /dev/null
+	fi
+
+	[ $? = 0 ] && when_alert "УСПЕШНО" || when_bad "С ОШИБКОЙ"
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+# 	Пересоздаем таблицу ipset для dnsmasq и перезапускаем сервис
+# 	В том числе и обрабатываем dns_crypt в случае, если он запущен
+#
+# ------------------------------------------------------------------------------------------
+refresh_dnsmasq_ipset_table(){
+
+		ready "${prefix}Заполняем dnsmasq таблицу данными из защищенного списка"
+		if /opt/apps/pivas/bin/main/dnsmasq  ; then #&>/dev/null
+			when_ok "УСПЕШНО"
+		else
+			if /opt/apps/pivas/bin/main/dnsmasq  ; then
+				when_ok "УСПЕШНО"
+			else
+				when_bad "ОШИБКА"
+			fi
+		fi
+#		ready "${prefix}Перезапускаем сервис dnsmasq"
+#		/opt/etc/init.d/S56dnsmasq restart &>/dev/null
+#		[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+#
+#		if get_dns_crypt_status | grep -q on ; then
+#			ready "${prefix}Перезапускаем сервис dns_crypt"
+#			dns_crypt_install '' &>/dev/null
+#			[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+#		fi
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Статус dnscrypt_proxy2
+#	 on - включен
+#	 off - выключен
+#
+# ------------------------------------------------------------------------------------------
+get_dns_crypt_status() {
+	# split DNS: домены списков → DNSCrypt через servers-file; глобального server= в dnsmasq.conf нет
+	if grep -hF "127.0.0.1#$(get_config_value DNS_CRYPT_PORT)" "${DNSMASQ_CONFIG}" /opt/etc/dnsmasq.d/pivas.servers 2>/dev/null \
+		| grep -qv '^#' ; then
+		echo on
+	else
+		echo off
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Устанавливаем с нуля dnscrypt_proxy2
+#
+# ------------------------------------------------------------------------------------------
+dns_crypt_install() {
+	is_install_stage="${1}"
+#	В случае наличия архива файла запуска сервиса dnscrypt_proxy2
+	if [ -f /opt/etc/init.d/K09dnscrypt-proxy2 ]; then
+		#warning "Обнаружен архив файла S09dnscrypt-proxy2."
+		ready "Восстанавливаем S09dnscrypt-proxy2 из архива..."
+#		реанимируем его из архива
+		cp /opt/etc/init.d/K09dnscrypt-proxy2 /opt/etc/init.d/S09dnscrypt-proxy2 1> /dev/null 2> "${ERROR_LOG_FILE}"
+		ready_status "${?}" "Ошибка при восстановлении S09dnscrypt-proxy2 из архива"
+	else
+		# Если запуск функции был не при установке пакета Пивас
+			if [ -z "${is_install_stage}" ]; then
+		#		при его отсутствии - устанавливаем пакет
+				if ! [ -f /opt/etc/init.d/S09dnscrypt-proxy2 ]; then
+					ready "Устанавливаем пакет dnscrypt-proxy2..."
+					opkg update &> /dev/null
+					opkg remove dnscrypt-proxy2 --force-depends 1> /dev/null 2> "${ERROR_LOG_FILE}"
+					opkg install dnscrypt-proxy2 --force-maintainer 1> /dev/null 2> "${ERROR_LOG_FILE}"
+					when_error "${?}" "Ошибка при установке пакета dnsmasq"
+				fi
+			else
+				if ! [ -f /opt/etc/init.d/S09dnscrypt-proxy2 ]; then
+	#				Если вызвана функция из postinst
+					error "Пакет dnscrypt-proxy2 был установлен с ошибками или поврежден!"
+					error "Файл запуска пакета /opt/etc/init.d/S09dnscrypt-proxy2 отсутствует!"
+					warning "Удалите Пивас и затем переустановите пакет dnscrypt-proxy2"
+					exit 1
+				fi
+			fi
+
+
+	fi
+#	Если dnscrypt_proxy2 запущен, то останавливаем его,
+#	так как необходимо его предварительно настроить
+	if /opt/etc/init.d/S09dnscrypt-proxy2 status | grep -q alive ; then
+		ready "Останавливаем службу dnscrypt-proxy2..."
+		/opt/etc/init.d/S09dnscrypt-proxy2 stop 1> /dev/null 2> "${ERROR_LOG_FILE}"
+		ready_status "${?}" "Проблема при остановке службы dnscrypt-proxy2"
+	fi
+
+	if [ -f "${DNSCRYPT_CONFIG}" ]; then
+		config__backup_as_opkg_if_not_exist "${DNSCRYPT_CONFIG}"
+
+		cp -f "${DNSCRYPT_CONFIG}" "${DNSCRYPT_CONFIG_BACKUP}"
+	elif [ -f "${DNSCRYPT_CONFIG_BACKUP}" ]; then
+		cp "${DNSCRYPT_CONFIG_BACKUP}" "${DNSCRYPT_CONFIG}"
+	else
+		config__restore_from_opkg "${DNSCRYPT_CONFIG}"
+	fi
+
+#	Настраиваем сервис
+	ready "Настраиваем dnscrypt-proxy2..."
+	cmd_dns_crypt_on 1> /dev/null 2> "${ERROR_LOG_FILE}"
+	ready_status "${?}" "Проблема при активации шифрования DNS трафика"
+}
+# ------------------------------------------------------------------------------------------
+#
+#	DNSCrypt по стране выхода slot-1 (DE→DE, EE→EE). RU-резолверы никогда.
+#
+# ------------------------------------------------------------------------------------------
+pivas_dnscrypt_pin_servers() {
+	local _pin=/opt/apps/pivas/bin/main/dnscrypt_pin
+	[ -x "${_pin}" ] || return 0
+	"${_pin}" >/dev/null
+	return 1
+}
+
+cmd_dns_crypt_on() {
+	exit_when_adguard_on status; [ "${status}" = 0 ] && {
+
+		crypt_port=$(get_config_value DNS_CRYPT_PORT)
+		if [ "$(get_dns_crypt_status)" = on ]; then
+			# Уже включено — подгоняем резолвер под страну slot-1.
+			if pivas_dnscrypt_pin_servers; then
+				/opt/etc/init.d/S09dnscrypt-proxy2 restart >/dev/null 2>&1 || true
+			fi
+			ready "Шифрование DNS уже";	when_ok "ПОДКЛЮЧЕНО"
+		else
+			dns_crypt_port=$(get_config_value DNS_CRYPT_PORT)
+			ready "Шифрование DNS"
+			{
+				# кэш
+				sed -i "s/\(^cache.=.\).*$/\1true/g"           '/opt/etc/dnscrypt-proxy.toml'
+				sed -i "s/\(^cache_min_ttl.=.\).*$/\15/g"      '/opt/etc/dnscrypt-proxy.toml'
+				sed -i "s/\(^cache_max_ttl.=.\).*$/\1129600/g" '/opt/etc/dnscrypt-proxy.toml'
+				sed -i "s/\(^cache_neg_min_ttl.=.\).*$/\11/g"  '/opt/etc/dnscrypt-proxy.toml'
+				sed -i "s/\(^cache_neg_max_ttl.=.\).*$/\11/g"  '/opt/etc/dnscrypt-proxy.toml'
+				# требование безопасности к серверам
+				sed -i "s/\(^require_dnssec.=.\).*$/\1true/g" '/opt/etc/dnscrypt-proxy.toml'
+				# пока нет поддержки IPv6
+				sed -i "s/\(^block_ipv6.=.\).*$/\1true/g"    '/opt/etc/dnscrypt-proxy.toml'
+				sed -i "s/\(^ipv6_servers.=.\).*$/\1false/g" '/opt/etc/dnscrypt-proxy.toml'
+				# более тяжёлые для роутера
+				sed -i "s/^[# ]\{0,1\}[ ]\{0,1\}\(doh_servers.=.\).*$/\1false/g" '/opt/etc/dnscrypt-proxy.toml'
+				# слушаем запросы только с роутера
+				sed -i "s/\(^listen_addresses.=.\).*$/\1['127.0.0.1:${crypt_port}'.*]/g" "${DNSCRYPT_CONFIG}" &> /dev/null
+				# DNSCrypt: страна резолвера = страна выхода slot-1, не РФ.
+				pivas_dnscrypt_pin_servers
+
+				# разрешаем ECH
+				sed -i 's/.*\(filter-rr.*\)/# \1/' /opt/etc/dnsmasq.conf
+
+				dns_crypt_port_change "${dns_crypt_port}" restart
+
+				# множество конфигов должно обновиться и службы перезапуститься
+				cmd_pivas_init 'no'
+			} 1> /dev/null 2> "${ERROR_LOG_FILE}"
+			ready_status "${?}" "Произошла непредвиденная ошибка." "ПОДКЛЮЧЕНО"
+		fi
+	}
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 ВЫключаем работу блока шифрования dns при помощи dnscrypt_proxy2
+#
+# ------------------------------------------------------------------------------------------
+cmd_dns_crypt_off() {
+	exit_when_adguard_on status; [ "${status}" = 0 ] && {
+
+		ready "Шифрование DNS"
+		{
+			crypt_port=$(get_config_value DNS_CRYPT_PORT)
+			static_dns=$(get_config_value DNS_STATIC_1)
+
+			sed -i "s/\(^server=\)${LOCALHOST_IP}#${crypt_port}/\1${static_dns}/" /opt/etc/dnsmasq.conf
+			sed -i 's/.*\(filter-rr.*\)/\1/' /opt/etc/dnsmasq.conf
+
+			sed -i '/echo \"server=/d' '/opt/apps/pivas/bin/main/dnsmasq' &> /dev/null
+			local server_echo="echo \"server=\/\$\{host\}\/${LOCALHOST_IP}#${crypt_port}\" >> \"\$\{ipset_file\}\""
+			sed -i 's/\(done.*\)/\t'"${server_echo}"'\n\n\1/g' '/opt/apps/pivas/bin/main/dnsmasq'
+
+			rm "${DNSMASQ_IPSET_HOSTS}"
+
+			set_config_value DNS_DEFAULT "${static_dns}#53"
+
+			# множество конфигов должно обновиться и службы перезапуститься
+			cmd_pivas_init 'no'
+		} 1> /dev/null 2> "${ERROR_LOG_FILE}"
+		ready_status "${?}" "Произошла непредвиденная ошибка." "ОТКЛЮЧЕНО"
+	}
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Выводим статус блока шифрования dns при помощи dnscrypt_proxy2
+#
+# ------------------------------------------------------------------------------------------
+cmd_dns_crypt_status_show() {
+	exit_when_adguard_on status; [ "${status}" = 0 ] && {
+
+		ready "Шифрование DNS"
+		if [ "$(get_dns_crypt_status)" = on ]; then
+			when_ok "ПОДКЛЮЧЕНО"
+		else
+			when_bad "ОТКЛЮЧЕНО"
+		fi
+	}
+
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Тестируем хост на доступность
+#	$1 - доменное имя
+#	$2 - команда для возврата:
+#		ip - возвращает ip вместо 1
+#
+# ------------------------------------------------------------------------------------------
+test_host() {
+
+	ret=0
+	if echo "${1}" | grep -q '\.' ; then
+		dns=$(get_config_value DNS_DEFAULT )
+		ips="$(get_iplist_from_domain "${1}" "${dns}" 2> /dev/null)"
+		if [ -z "${ips}" ]; then
+			dns=$(get_config_value DNS_STATIC_1)
+			ips=$(get_iplist_from_domain "${1}" "${dns}" 2> /dev/null)
+
+			if [ -z "${ips}" ]; then
+				dns=$(get_config_value DNS_STATIC_2);
+				ips=$(get_iplist_from_domain "${1}" "${dns}" 2> /dev/null)
+				[ -n "${ips}" ] && set_config_value DNS_DEFAULT "${dns}"
+			else
+				set_config_value DNS_DEFAULT "${dns}"
+			fi
+		fi
+		if [ -n "${2}" ] && [ "${2}" = ip ]; then
+			ret=${ips}
+		else
+			if [ -n "$( echo "${ips}" | head -1 2> /dev/null )" ]; then ret=1; fi
+		fi
+	fi
+	echo "${ret}"
+
+}
+
+add_host_to_adguard(){
+	clear_host="${1}"
+	#   AdGuardHome обработка
+	echo "${_host}" >> "${PIVAS_LIST_FILE}"
+	[ -f "${ADGUARD_IPSET_FILE}" ] && cat < "${ADGUARD_IPSET_FILE}" | grep -q "${clear_host}" \
+	 		|| echo "${clear_host}/${IPSET_TABLE_NAME}" >> "${ADGUARD_IPSET_FILE}"
+	if echo "${host}" | grep -q '\*' ; then
+  		echo "ipset=/:.*${clear_host}:/${IPSET_TABLE_NAME}" >> "${DNSMASQ_IPSET_HOSTS}"
+  	else
+    	echo "ipset=/${clear_host}/${IPSET_TABLE_NAME}" >> "${DNSMASQ_IPSET_HOSTS}"
+  	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+# 	Добавляем один хост
+# 	$1 - имя домена
+# 	$2 - делаем ли сброс таблиц или нет (нужно отключать при импорте множества доемнных имен)
+#	$3 - если  параметр был задан как 'yes|y|wild' то, добавляем * без вопросов
+#
+# ------------------------------------------------------------------------------------------
+host_add() {
+	if echo "${1}" | grep -qE "${IP_FILTER}|${NET_FILTER}" ; then
+		clear_host="${1}"
+	else
+		clear_host=$(echo "${1}" | sed 's/\*//;' | sed -n -E 's|^(https?://)?([^/]+).*|\2|p')
+	fi
+	reset="${2}"
+	wild="${3}"
+#	в режиме импорта хост не трогаем - оставляем как есть
+	[ "${wild}" = import ] || _host="${clear_host}"
+
+	if echo "${wild}" | grep -qiE 'import|no|n' ; then
+#		в режиме импорта задавать вопросы не нужно - добавляем хост как есть.
+		answer=n
+	else
+#		Если адрес или сеть, то пропускаем вопрос
+		if echo "${clear_host}" | grep -qE "${IP_FILTER}|${NET_FILTER}" ; then
+			answer=n
+		else
+#			Если третий параметр был задан как 'yes|y|wild' то, добавляем * без вопросов
+			if echo "${wild}" | grep -qiE 'yes|y|wild' ; then
+				# answer=y
+				answer=n # изменено для 1.1.9b8
+			else
+				answer='n';
+#				Задаем вопрос о необходимости поддержки режима wildcard и ждем 6 сек на ответ
+# 				если ответа не поступило, то по умолчанию ответ 'Y'
+				# read_ynq_timer "Добавить хост с поддоменами wildcard [Y] или нет [N]?" answer Y 6
+				# if [ "${answer}" = q ] ; then exit_q; print_line; exit 1; fi
+				#print_line
+			fi
+		fi
+	fi
+
+#	Проверяем на необходимость поддержки wildcard
+	if echo "${answer}" | grep -qiE 'y|yes' ; then
+		_host="${clear_host}"
+	fi
+
+	ready "Добавляем ${YELLOW}${_host}${NOCL} в защищенный список..."
+	echo "${_host}" >> "${PIVAS_LIST_FILE}"
+	[ $? = 0 ] && when_ok "ДОБАВЛЕН" || when_bad "НЕ ДОБАВЛЕН"
+
+#	если включен блокировщик рекламы
+	if cmd_ads_status | grep -q ВКЛЮЧЕН ; then
+		ads_list_hosts_update &> /dev/null
+	fi
+
+	[ "${reset}" = 'yes' ] && cmd_pivas_refresh_lists &> /dev/null
+
+	[ -f /opt/etc/AdGuardHome/AdGuardHome.yaml ] && cmd_adguardhome_status | grep -q ВКЛЮЧЕН && add_host_to_adguard "${clear_host}" &> /dev/null
+
+	if echo "${clear_host}" | grep -qE -- "$(get_regexp_ip_or_range)" ; then
+		# если строка IP, диапазон или маска; то добавляем напрямую и без ttl
+		/opt/sbin/ipset -exist add "${IPSET_TABLE_NAME}" "${clear_host}" timeout 0 &>/dev/null
+	elif [ "${wild}" != 'import' ] && [ "${reset}" = 'yes' ] ; then
+		# если это одиночное добавление, то можем
+		# прогреть переданный домен (без под*), 
+		# чтобы пользователю не пришлось сбрасывать кэш DNS
+		ipset__fill_by_domain "${clear_host}" &> /dev/null
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Добавляем в белый список одно доменное имя, точнее список его IP адресов
+#	$1 - доменное имя, для которого необходимо получить IP
+# 	$2 - делаем ли сброс таблиц или нет (нужно отключать при импорте множества доемнных имен)
+# 	$3 - режим тестирования домена, если не пусто, проводим тестирование,
+# 		 если равно, test то выдаем данные о добавлении для команды import
+#
+# ------------------------------------------------------------------------------------------
+cmd_add_one_host() {
+	wild="${3:-}"
+	reset="${2:-yes}"
+
+	#ToDo: использовать эту переменную ниже
+	local regexp_ip_or_range=$(get_regexp_ip_or_range)
+	if echo "${1}" | grep -qE -- "${regexp_ip_or_range}" ; then
+		host="${1}"
+	else
+		host=$(echo "${1}" | sed 's/\*//;' | sed -n -E 's|^(https?://)?([^/]+).*|\2|p')
+	fi
+
+	# Если первый параметр пуст или равен 'tags', то 
+	# делаем запрос на выбор пиваски и добавляем все доменные имена из пиваски в список защиты
+	[ -z "${host}" ] || [ "${host}" = tags ] && {
+		add_tag_section_to_protect_list
+		return 0
+	}
+
+	# Проверяем есть ли в введенной строке имя метки -tag или нет
+	# busybox grep без -P (печатал usage при каждом pivas add)
+	has_tag=$(echo "${*}" | grep -qE -- '(^| )-tag [^ ]+' && echo yes)
+
+	if [ "${has_tag}" ] ; then
+		tag_name=$(echo "${*}" | sed 's/.*\-tag \(.*\)/\1/')
+		# Помечаем доменное имя тегом 
+		cmd_add_domain_to_tag_list "${tag_name}" "${host}"
+	fi
+
+	
+	# Если  помимо этого домена существует еще доменные с одноименным тегом
+	# то делаем запрос на их доавление.
+	local _tmpfile=$(mktemp)
+	echo "${host}" | grep -qE "${IP_FILTER}" || {
+		_get_same_tag_domains_missing_in_protection_list "${host}" | sed '/^$/d' > "${_tmpfile}"
+	}
+	# Проверяем есть ли в этом списке домены
+	[ -s "${_tmpfile}" ] && {
+		[ -z "${tag_name}" ] && tagname=$(_get_tagname_by_domain "${host}" | tail -1)
+		# Если есть, то спрашивем добавить ли их
+		read_ynq "Найдены доменные имена с тегом '${tag_name}',которых пока нет в списке защищенных доменнов.\nДобавить их в список?" answer
+		[[ "$answer" =~ [qn] ]] && return 1
+		if [[ "$answer" =~ [y] ]] ; then
+			print_line
+			cmd_import_hosts "${_tmpfile}"
+		fi
+		rm -f "${_tmpfile}"
+		return 0
+	}
+	
+
+	clear_host=$(echo "${host}" | sed 's/\*//')
+	
+	#	формальная проверка на наличие точки в имени домена
+	if echo "${host}" | grep -q '\.' ; then
+		# если точка в имени домена есть, то проверяем на корректность IP
+		if echo "${clear_host}" | grep -qE "${IP_FILTER}*" ; then
+			# если точка в имени домена есть, то проверяем на корректность IP
+			if echo "${clear_host}" | grep -qE "^${IP_FILTER}/[0-9]{1,2}$|^${IP_FILTER}$|^${IP_FILTER}-${IP_FILTER}$" ; then
+				# если включен режим импорта
+				if [ "${wild}" = import ] ; then
+					host_add "${host}" "${reset}" "${wild}" | grep -q "ДОБАВЛЕН" && echo "+"
+				else
+					host_add "${host}" "${reset}" "${wild}"
+				fi
+			else
+				if [ "${wild}" = import ] ; then
+					echo "2"
+				else
+					error "Введенный IP адрес или диапазон IP-адресов имеет некорректный формат." nl
+				fi
+			fi
+		else
+			# проверка на наличие домена в списке защиты доменов
+			if cat < "${PIVAS_LIST_FILE}" | grep -qE "^${clear_host}" ; then
+				[ "${wild}" = import ] || warning "Такой домен уже есть в защищенном списке!"
+				if [ "${clear_host}" != "${host}" ] ; then
+					warning "Производим замену ${clear_host} на ${host}"
+					print_line
+					sed -i "/^${clear_host}$/d" "${PIVAS_LIST_FILE}"
+
+					if [ "${wild}" = import ]; then
+						host_add "${host}" "${reset}" "${wild}" | grep -q "ДОБАВЛЕН" && echo "1"
+					else
+						host_add "${host}" "${reset}" "${wild}"
+					fi
+				else
+					[ "${wild}" = import ] && echo "-"
+				fi
+
+			else
+
+				if [ "${wild}" = import ]; then
+					host_add "${host}" "${reset}" "${wild}" | grep -q "ДОБАВЛЕН" && echo "+"
+				else
+					host_add "${host}" "${reset}" "${wild}"
+				fi
+			fi
+		fi
+	else
+		if [ "${wild}" = import ]; then
+			echo "2"
+		else
+			error "Некорректно указано имя домена - ${1}." no_nln
+		fi
+	fi
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Удаляем из белого списка одно доменное имя, точнее список его IP адресов
+#	$1 - доменное имя для удаления
+#
+# ------------------------------------------------------------------------------------------
+cmd_del_one_host() {
+	local host_="${1}"
+
+	# Если первый параметр пуст или равен 'tags', то 
+	# делаем запрос на выбор пиваски и добавляем все доменные имена из пиваски в список защиты
+	[ -z "${host_}" ] || [ "${host_}" = tags ] && {
+		del_tag_section_to_protect_list
+		return 0
+	}
+
+	if cat < "${PIVAS_LIST_FILE}" | grep -qe "${host_}$" ; then
+		ready "Удаляем ${YELLOW}${host_}${NOCL} из списка защищенных..."
+		sed -i "/${host_////\\/}/d" "${PIVAS_LIST_FILE}"
+
+		cmd_adguardhome_status | grep -q ВКЛЮЧЕН && sed -i "/${host_////\\/}/d" "${ADGUARD_IPSET_FILE}"
+		cmd_pivas_refresh_lists &> /dev/null
+		[ $? = 0 ] && when_ok "УДАЛЕН" || when_bad "НЕ УДАЛЕН"
+
+		# если включен блокировщик рекламы
+		if cmd_ads_status | grep -q ВКЛЮЧЕН ; then
+			ready "Удаляем ${YELLOW}${host_}${NOCL} из списка блокировки рекламы..."
+			/opt/apps/pivas/bin/main/adblock &> /dev/null
+			[ $? = 0 ] && when_ok "УДАЛЕН" || when_bad "НЕ УДАЛЕН"
+		fi
+
+		if echo "${host_}" | grep -qE -- "$(get_regexp_ip_or_range)" ; then
+			# если строка IP, диапазон или маска
+			/opt/sbin/ipset -exist del "${IPSET_TABLE_NAME}" "${host_}" &>/dev/null
+		else
+			local ip_list=$( dns__get_ips_by_domain "${host_}" )
+			if [ -n "${ip_list}" ]; then
+				IFS=$'\n'
+				for ip in ${ip_list}; do
+					# если нет в списке
+					if ! ipset list "${IPSET_TABLE_NAME}" | grep -qE "^${ip} " ; then
+						continue
+					fi
+
+					log_warning "Удаление из IPSet ${IPSET_TABLE_NAME} ${ip} домена ${host_}"
+					/opt/sbin/ipset -exist del "${IPSET_TABLE_NAME}" "${ip}" &>/dev/null
+				done
+			fi
+		fi
+	else
+		error "Такая запись отсутствует в списке защищенных!" no_nln
+	fi
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Удаляем из белого списка множество доменных имен
+#	$1 - список доменных имен для удаления
+#
+# ------------------------------------------------------------------------------------------
+del_multy_hosts() {
+	list_to_del="$(echo "$1" | sed 's/^[0-9]\{1,2\}\. //g')"
+
+	if [ -z "${list_to_del}" ]; then
+		error "Список пуст!" 
+		return 1
+	else
+		for host_ in ${list_to_del}; do
+			ready "Удаляем ${YELLOW}${host_}${NOCL} из списка защищенных..."
+			if cat < "${PIVAS_LIST_FILE}" | grep -qe "${host_}$" ; then
+				
+				if cmd_adguardhome_status | grep -q ВКЛЮЧЕН ; then 
+					sed -i "/${host_////\\/}/d" "${ADGUARD_IPSET_FILE}"
+				else 
+					sed -i "/${host_////\\/}/d" "${PIVAS_LIST_FILE}"
+				fi
+				[ $? = 0 ] && when_ok "УДАЛЕН" || when_bad "НЕ УДАЛЕН"
+			else 
+				when_alert "НЕТ В СПИСКЕ"
+			fi
+		done
+		#	если включен блокировщик рекламы
+		if cmd_ads_status | grep -q ВКЛЮЧЕН ; then
+			ready "Удаляем имена выше из списка блокировки рекламы"
+			/opt/apps/pivas/bin/main/adblock &> /dev/null
+			[ $? = 0 ] && when_ok "ГОТОВО" || when_bad "ОШИБКА"
+		fi
+		print_line
+		ready "Применяем изменения списка (dnsmasq, ipset)"
+		cmd_pivas_refresh_lists &> /dev/null
+		[ $? = 0 ] && when_ok "ГОТОВО" || when_bad "ОШИБКА"
+	fi
+
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Очищаем полностью белый список
+#
+# ------------------------------------------------------------------------------------------
+
+cmd_clear_list() {
+	if ! [ -f "${PIVAS_LIST_FILE}" ]; then
+		error 'Списочный файл не существует!'
+		exit 1
+	fi
+	#if [ "$(rec_in_file "${PIVAS_LIST_FILE}")" = '0' ]; then
+	# Предыдущий код закомментирован выше. Сортировать и чистить /opt/etc/pivas.list 
+	# (который итак упорядочен и отфильтрован, это же не пользовательские данные) 
+	# только для проверки на пустоту — крайне затратная операция при большом размере.
+	# Условность для ускорения: если есть IP или доменное имя, то должна быть точка.
+	if ! grep -Fq '.' "${PIVAS_LIST_FILE}"; then
+		error 'Защищённый список уже пуст.'
+		return
+	fi
+
+	local console_param="${1}"
+
+	local submessage
+	if [ "${console_param}" = 'ip' ]; then
+		submessage='от IP'
+	else
+		submessage='целиком'
+	fi
+	submessage="Очищаем защищённый список ${submessage}"
+
+
+	if [ "${console_param}" = 'ip' ]; then
+		echo -n "${submessage}..."
+		log_warning "${submessage}"
+
+		local tmp_file='/tmp/pivas_without_ip.txt'
+		>"${tmp_file}"
+		local regexp_ip
+		regexp_ip="$(get_regexp_ip_or_range)"
+		local readed_count=0
+		local deleted_count=0
+		local saved_count=0
+		local lines_cache=''
+		while read line; do
+			# скорее всего, лишний блок
+			if [ -z "${line}" ]; then
+				continue
+			fi
+
+			# заменитель шкалы прогресса, каждые 50 записей
+			readed_count=$((readed_count + 1))
+			if [ "$(( ${readed_count} % 50 ))" -eq 0 ]; then
+				echo -n '.'
+			fi
+
+			# IP вычищаем из ipset и считаем
+			if echo "${line}" | grep -qE -- "${regexp_ip}"; then
+				/opt/sbin/ipset -exist del "${IPSET_TABLE_NAME}" "${line}"
+				deleted_count=$((deleted_count + 1))
+				continue
+			fi
+
+			# неIP в новый файл не построчно, а блоками
+			lines_cache="${lines_cache}${line}"$'\n'
+			saved_count=$((saved_count + 1))
+			if [ "$(( ${saved_count} % 50 ))" -eq 0 ]; then
+				echo -n "${lines_cache}" >>"${tmp_file}"
+				lines_cache=''
+			fi
+		done <"${PIVAS_LIST_FILE}"
+		echo -n 'удалено '
+		if [ -n "${lines_cache}" ]; then
+			echo -n "${lines_cache}" >>"${tmp_file}"
+		fi
+		echo "${deleted_count}."
+
+		echo -n 'Предыдущий защищённый список сохранён в '
+		mv -f "${PIVAS_LIST_FILE}" "${PIVAS_LIST_FILE_BACKUP}"
+		mv "${tmp_file}" "${PIVAS_LIST_FILE}"
+		echo "${PIVAS_LIST_FILE_BACKUP}"
+
+		# из списка были вычищены лишь IP, не требуются
+		# refresh_dnsmasq_ipset_table или refresh_adguard_ipset_table
+		# и рестарты
+		return
+	fi
+
+
+	if [ -z "${console_param}" ]; then
+		while true; do
+			ready 'Защищённый список будет очищен. Уверены?' && read -r yn
+			case ${yn} in
+				[Yy]*)
+					console_param='yes'
+					break
+				;;
+				[NnQq]*)
+					break
+				;;
+				*)
+					please_repeat
+				;;
+			esac
+		done
+	fi
+	if [ "${console_param}" = 'y' ] || [ "${console_param}" = 'yes' ] || [ "${console_param}" = 'force' ] ; then
+		ready "${submessage}..."
+		log_warning "${submessage}"
+
+		mv -f "${PIVAS_LIST_FILE}" "${PIVAS_LIST_FILE_BACKUP}"
+		rm -f "${ADGUARD_IPSET_FILE}"
+		touch "${PIVAS_LIST_FILE}"
+
+		cmd_pivas_init 'update' &> /dev/null
+		[ $? = 0 ] && when_ok 'ОЧИЩЕН' || when_bad 'ОШИБКА'
+
+		print_line
+		warning "Предыдущий защищённый список был сохранён в файл ${PIVAS_LIST_FILE_BACKUP}"
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Считаем число строк/записей в переданной переменной
+#
+# ------------------------------------------------------------------------------------------
+rec_in_var() {
+	echo -e "${1}" | sed '/^$/d' | wc -l
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Импортируем (вносим) список доменов в "белый список"
+#
+#	$1 - имя файла со списком доменных имен, допускается использование # для комментариев
+#		 одно имя - одна строка в списочном файле
+#
+# ------------------------------------------------------------------------------------------
+cmd_import_hosts() {
+	user_list="${1}"
+	if [ -z "${user_list}" ]; then
+		error 'Не задан файл для импорта!'
+		error 'Укажите его вторым аргументом при запуске.'
+		exit 1
+	fi
+	if ! [ -f "${user_list}" ]; then
+		error "Не найден файл ${user_list}!"
+		error 'Проверьте верность написания пути и его имени.'
+		exit 1
+	fi
+	# Условность для ускорения: если есть IP или доменное имя, то должна быть и точка
+	if ! grep -Fq '.' "${user_list}"; then
+		error "Не найдены IP или имена доменов в файле ${user_list}!"
+		error 'Заполните его данными.'
+		exit 1
+	fi
+
+	# файл с неверными переносами строк
+	if grep -Fq $'\r' "${user_list}"; then
+		if [ $(wc -l < "${user_list}") -gt 1 ]; then
+			# есть оба — Windows/DOS
+			local sed_regex='s/\r//'
+		else
+			# я блочное
+			local sed_regex='s/\r/\n/g'
+		fi
+
+		sed -i "${sed_regex}" "${user_list}"
+	fi
+
+	regexp_ip=$(get_regexp_ip_or_range)
+	if ! grep -vEq -- "${regexp_ip}" "${user_list}"; then
+		# альтернативный оптимизированный код для списка IP
+		# благодаря верхней проверке, мы знаем, что комментариев и пустых строк уже нет
+		# проверку на уникальность сделаем на лету, сортировку в финале
+
+		#sort -o не поддерживается, поэтому через временный файл
+		local tmp_file='/tmp/pivas_sorted_list.txt'
+		cp -f "${PIVAS_LIST_FILE}" "${tmp_file}"
+
+		echo -n 'Импортируем IP в список защиты..'
+		local readed_count=0
+		local added_count=0
+		local lines_cache=''
+		while read line; do
+			# заменитель шкалы прогресса, каждые 50 записей
+			readed_count=$((readed_count + 1))
+			if [ "$(( ${readed_count} % 50 ))" -eq 0 ]; then
+				echo -n '.'
+			fi
+
+			# уже добавлен, уникализация добавляемого
+			if grep -Fq -- "${line}" "${tmp_file}"; then
+				continue
+			fi
+
+			# IP не умеют самовосстанавливаться, ttl бесконечность
+			/opt/sbin/ipset -exist add "${IPSET_TABLE_NAME}" "${line}" timeout 0
+
+			lines_cache="${lines_cache}${line}"$'\n'
+			added_count=$((added_count + 1))
+			if [ "$(( ${added_count} % 50 ))" -eq 0 ]; then
+				# пишем в файл не построчно, а блоками
+				echo -n "${lines_cache}" >>"${tmp_file}"
+				lines_cache=''
+			fi
+		done <"${user_list}"
+		echo -n 'добавлено '
+		if [ -n "${lines_cache}" ]; then
+			echo -n "${lines_cache}" >>"${tmp_file}"
+		fi
+		echo "${added_count}."
+
+		echo -n 'Предыдущий защищённый список сохранён в '
+		mv -f "${PIVAS_LIST_FILE}" "${PIVAS_LIST_FILE_BACKUP}"
+		echo "${PIVAS_LIST_FILE_BACKUP}"
+
+		echo -n 'Сортируем список защиты...'
+		sort "${tmp_file}" >"${PIVAS_LIST_FILE}"
+		rm -f "${tmp_file}"
+		echo 'сделано.'
+
+		# в список были добавлены лишь IP, не требуются
+		# refresh_dnsmasq_ipset_table или refresh_adguard_ipset_table
+		# и рестарты
+		return
+	fi
+
+	# изначальный код без изменений
+	ready 'Импортируем хосты в список защищаемых доменов...'
+	clear_file_content "${user_list}"
+	#clear_file_content "${PIVAS_LIST_FILE}"
+
+	hosts_to_add_ubl=''
+	hosts_repeated_ubl=''
+	hosts_not_added=''
+	hosts_errors=''
+	while read -r line || [ -n "${line}" ]; do
+		# удаляем из строки комментарии - все что встречается после символа # и сам символ
+		host=$(echo "${line}" | sed 's/#.*$//g' | tr -s ' ')
+		#  пропускаем пустые строки и строки с комментариями
+		[ -z "${host}" ] && continue
+		#  пропускаем строки с комментариями
+		[ "${host:0:1}" = "#" ] && continue
+
+		case "$(cmd_add_one_host "${host}" "no" "import")" in
+		0) hosts_not_added="${hosts_not_added}${host}\n" ;;
+		1) hosts_repeated_bl="${hosts_repeated_bl}${host}\n" ;;
+		+) hosts_to_add_ubl="${hosts_to_add_ubl}${host}\n" ;;
+		2) hosts_errors="${hosts_errors}${host}\n";;
+		*) ;;
+		esac
+	done < "${user_list}"
+
+	# добавляем хосты в файл списочный
+	_hosts_to_add_ubl=$(echo -e "${hosts_to_add_ubl}" | sed '/^$/d; /^[-+.]/!s/\(.*\)/\1/')
+	echo -e "${_hosts_to_add_ubl}" >> "${PIVAS_LIST_FILE}"
+	clear_file_content "${PIVAS_LIST_FILE}"
+
+	# если включен блокировщик рекламы
+	if cmd_ads_status | grep -q ВКЛЮЧЕН ; then
+		ads_list_hosts_update &> /dev/null
+	fi
+
+	cmd_pivas_init  "update" &> /dev/null
+	[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+
+	num_not_added=$(rec_in_var "${hosts_not_added}")
+	num_repeated_ubl=$(rec_in_var "${hosts_repeated_ubl}")
+	num_to_add_ubl=$(rec_in_var "${hosts_to_add_ubl}")
+	num_errors=$(rec_in_var "${hosts_errors}")
+
+	num_errors=$((num_not_added + num_repeated_ubl + num_errors))
+	tab="    "
+	# print_line
+	if [ "${num_to_add_ubl}" -gt 0 ]; then
+		# :
+		#warning "Новых записей добавлено не было!"
+	# else
+		warning "В защищенный список было добавлено ${YELLOW}${num_to_add_ubl}${GREEN} новых домена/ов:"
+		print_line
+		if [ "${num_to_add_ubl}" -gt 0 ]; then
+			warning "${tab}Список добавленных доменов:"
+			print_line
+			echo -e "${hosts_to_add_ubl}" | sed '/^$/d; /^[-]/!s/\(.*\)/'"${tab}${tab}"'\1/g'
+		fi
+	fi
+	if [ "${num_errors}" -gt 0 ]; then
+		echo
+		error "В ходе импорта возникли ошибки ${YELLOW}${num_errors}${RED} шт.:"
+		print_line
+		if [ "${num_not_added}" -gt 0 ]; then
+			error "${tab}Проблем в написании или недоступности доменов выявлено ${YELLOW}${num_not_added}${RED} шт."
+			print_line
+			echo -e "${hosts_not_added}" | sed 's/^$/'"$(print_line)"'/; /^[-]/!s/\(.*\)/'"${tab}${tab}"'\1/g'
+		fi
+		if [ "${num_repeated_ubl}" -gt 0 ]; then
+			error "${tab}Домены ниже уже присутствуют в защищенном списке [${YELLOW}${num_repeated_ubl}${RED} шт.]"
+			print_line
+			echo -e "${hosts_repeated_ubl}" | sed 's/^$/'"$(print_line)"'/; /^[-]/!s/\(.*\)/'"${tab}${tab}"'\1/g'
+		fi
+	fi
+}
+
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Экспортируем (сохраняем) список доменов в другой файл
+#	$1 - имя файла архива
+#
+# ------------------------------------------------------------------------------------------
+cmd_export_hosts() {
+	HOSTS_LIST=$(cat < "${PIVAS_LIST_FILE}" | sed 's/\(^.*\)#.*$/\1/g' | grep -v '#' | tr -s '\n')
+	backup_name=${1}
+	if [ -z "${backup_name}" ]; then
+		error "Так как не задано имя файла для экспорта, то"
+		error "Сохраняем архив в файл ${PIVAS_LIST_FILE_BACKUP}"
+		backup_name=${PIVAS_LIST_FILE_BACKUP}
+	else
+		mkdir -p "$(dirname "${backup_name}")" && touch "${backup_name}" &> /dev/null
+	fi
+	ready "Сохраняем записи в файл ${YELLOW}${backup_name}${GREEN}..."
+	echo "${HOSTS_LIST}" > "${backup_name}"
+	[ $? = 0 ] && when_ok "СОХРАНЕНЫ" || when_bad "ОШИБКА"
+}
+
+
+
+
+# -------------------------------------------------------------------------------------------
+#
+#   Функция для добавления доменов в список для защиты
+#
+# ------------------------------------------------------------------------------------------
+add_tag_section_to_protect_list() {
+
+    local tag_selected answer domains
+    tag_select "добавления" tag_selected
+    [ -n "${tag_selected}" ] && {
+        print_line
+        echo -e "В защищенный список будут добавлены следующие домены:"
+        print_line
+
+		if [ "${tag_selected}" = ALL ] ; then
+			domains=$(cat < "${TAGS_FILE}" | sed 's/\(^.*\)#. *$/\1/g' | grep -Ev '#|\[' | tr -s '\n')
+		else
+			domains=$(get_tag_domain_list "${tag_selected}")
+		fi
+#set -xeu
+		grep_list_to_add=$(echo -e "${domains}" | sed '/^$/d' | sort -u | sed -e 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed 's/\(.*\)/^\1$/g' )
+		local exist_into_list=""
+
+		while IFS= read -r domain; do
+			grep -q "$domain" "${PIVAS_LIST_FILE}" || exist_into_list="${exist_into_list}$(echo "${domain}\n" | sed 's/[\^]//; s/[\$]//')"
+		done <<EOF
+$grep_list_to_add
+EOF
+
+		exist_into_list=$(echo -e "${exist_into_list}" | sed '/^$/d' | sed = | sed 'N;s/\n/. /g')
+		echo "${exist_into_list}"
+		print_line
+		# read_ynq "Добавляем?" answer
+        # if [[ "$answer" =~ [qQ] ]] ; then
+        #     return 0
+        # elif [ "${answer}" = y ]; then
+		# print_line
+		local TMPFILE=$(mktemp)
+		echo -e "${exist_into_list}" | sed 's/^[0-9]\{1,3\}\. \(.*\)/\1/g' | sed '/^$/d' > "${TMPFILE}"
+		cmd_import_hosts "${TMPFILE}"
+		rm "${TMPFILE}"
+        # fi
+    }
+
+}
+
+
+# -------------------------------------------------------------------------------------------
+#
+#   Функция для удаления доменов из списка защиты
+#
+# ------------------------------------------------------------------------------------------
+del_tag_section_to_protect_list() {
+
+    # local section="$1"
+    local tag_selected answer
+    tag_select "удаления" tag_selected
+	[ -z "${tag_selected}" ] && return 1
+
+	print_line
+	if [ "${tag_selected}" = ALL ] ; then
+		domains=$(cat < "${TAGS_FILE}" | sed 's/\(^.*\)#. *$/\1/g' | grep -Ev '#|\[' | tr -s '\n')
+	else 
+		domains=$(get_tag_domain_list "${tag_selected}")
+	fi
+	grep_list_to_del=$(echo -e "${domains}" | sed '/^$/d' | sort -u | sed -e 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed 's/\(.*\)/^\1$/g' )
+	exist_into_list=$(grep -oE "${grep_list_to_del}" "${PIVAS_LIST_FILE}" | sed = | sed 'N;s/\n/. /g')
+	
+	if [ -n "${exist_into_list}" ] ; then
+		echo -e "${exist_into_list}"
+		print_line
+		read_ynq "Удаляем?" answer
+		if [[ "$answer" =~ [qQ] ]] ; then
+			return 0 
+		elif [ "${answer}" = y ]; then
+			print_line
+			del_multy_hosts "$(echo -e "${exist_into_list}" | sed 's/^[0-9]\{1,3\}\.\().*\)//g')"
+		fi
+    else
+		echo -e "Домены для удаления не обнаружены в списке защиты."
+	fi
+}
+
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Отображаем БС
+#
+# ------------------------------------------------------------------------------------------
+print_host_list(){
+	warning "Защищенный список содержит ${YELLOW}${num_plus}${GREEN} записей:"
+	print_line
+	clear_content "${PIVAS_LIST_FILE}"
+}
+
+cmd_show_list() {
+
+	if [ -f "${PIVAS_LIST_FILE}" ]; then
+		num_plus=$(rec_in_file "${PIVAS_LIST_FILE}")
+		if [ "${num_plus}" -eq 0 ]; then
+			echo -e "${RED}Защищенный список пуст!${NOCL}"
+#			Если список хостов пуст, то проверяем есть ли архивная копия
+			if [ -f "${PIVAS_LIST_FILE_BACKUP}" ] ; then
+				print_line
+				warning "Обнаружена архивная копия защищенного списка!"
+				answer=''; read_ynq_timer "Восстановить данные из архива или нет [Y/N]?" answer Y 10
+				if [ "${answer}" = q ] ; then exit_q; print_line; exit 1; fi
+				if echo "${answer}" | grep -qi y ; then
+					cp "${PIVAS_LIST_FILE_BACKUP}" "${PIVAS_LIST_FILE}"
+					warning "Защищенный список восстановлен из архивной копии."
+					print_line
+					print_host_list
+				else
+					print_line
+					warning "Пожалуйста, добавьте данные в список при помощи 'pivas add имя_домена'"
+				fi
+			else
+				print_line
+				warning "Пожалуйста, добавьте в него данные при помощи 'pivas add имя_домена'"
+			fi
+		else
+			print_host_list
+		fi
+	else
+#		Если список хостов не существует, то проверяем, есть ли архивная копия
+		if [ -f "${PIVAS_LIST_FILE_BACKUP}" ] ; then
+			warning "Обнаружена архивная копия защищенного списка!"
+				answer=''; read_ynq_timer "Восстановить данные из архива (Y) или нет (N)?" answer Y 10
+				if [ "${answer}" = q ] ; then exit_q; print_line; exit 1; fi
+				if echo "${answer}" | grep -qi y ; then
+					cp "${PIVAS_LIST_FILE_BACKUP}" "${PIVAS_LIST_FILE}"
+					warning "Защищенный список восстановлен из архивной копии."
+					print_line
+					print_host_list
+				fi
+		else
+			error "Защищенного списка не существует."
+			warning "Пожалуйста, добавьте в него данные при помощи 'pivas add имя_домена'"
+		fi
+	fi
+}

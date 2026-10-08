@@ -1,0 +1,12 @@
+Package: pivas-web
+Version: 1.0-custom20
+Depends: pivas, python3-base, python3-light
+Section: utils
+Architecture: all
+URL: n/a (local custom fork)
+Installed-Size: 94208
+Description: Web UI (LAN-only) для управления pivas.
+ Python http.server на 192.168.x.x:8888 + CGI-обёртки вокруг 'pivas' CLI.
+ Auth: форма логина (admin + пароль) с HMAC cookie-сессией. RSS ~12-18 МБ.
+ По умолчанию ВЫКЛЮЧЕН. Включается: 'pivas web on' или кнопкой 'Веб'
+ в Telegram-боте (бот сам попросит пароль при первом запуске).

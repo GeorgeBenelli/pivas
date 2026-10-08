@@ -1,0 +1,7 @@
+#!/bin/sh
+[ "${1:-}" = upgrade ] && exit 0
+touch /opt/etc/pivas.paused
+/opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py detach >/dev/null 2>&1 || true
+/opt/etc/init.d/S95pivas-routes stop >/dev/null 2>&1 || true
+( . /opt/apps/pivas/bin/libs/ndm; ip4__chain__delete_jump nat PIVAS_DNS ) >/dev/null 2>&1 || true
+/opt/etc/init.d/S10dnscrypt-slot2 stop >/dev/null 2>&1 || true

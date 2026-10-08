@@ -1,0 +1,37 @@
+#!/bin/sh
+
+# All state writers share one lock; nested calls retain its owner token.
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py try-locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+
+#------------------------------------------------------------------------------
+#
+#       ПАКЕТ ПИВАС
+#
+#------------------------------------------------------------------------------
+#
+#       Данный файл служит для создания правил для пропуска DNS трафика по 53 порту (tcp и udp)
+#       при использовании любого VPN подключения (в том числе и shadowsocks).
+#       Они срабатывают при пепезаписи правил в таблице netfilter
+#       https://github.com/ndmsystems/packages/wiki/Opkg-Component
+#
+# ------------------------------------------------------------------------------
+#       Дата создания: 21/05/2022
+#       Лицензия: Apache License 2.0
+# ------------------------------------------------------------------------------
+
+# pivas stop: клиенты должны резолвить штатным DNS Keenetic
+[ -f /opt/etc/pivas.paused ] && exit 0
+# Авария сторожка (check_dns): локальный DNS лежит, перехват возвращать нельзя -
+# иначе клиенты снова на мёртвом DNS. Сторожок сам вернёт перехват, когда DNS ответит.
+[ -f /opt/tmp/pivas-dns-watchdog.bypass ] && exit 0
+
+# IPv4
+# Роутинг DNS в nat
+if [ "${type}" = 'iptables' ] && [ "${table}" = 'nat' ] ; then
+	. /opt/apps/pivas/bin/libs/ndm
+
+	ip4__dns__add_routing_for_home &> /dev/null
+fi

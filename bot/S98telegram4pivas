@@ -1,0 +1,49 @@
+#!/bin/sh
+PATH=/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+NAME=telegram4pivas
+PIDF=/opt/var/run/$NAME.pid
+LOG=/opt/tmp/$NAME.log
+mkdir -p /opt/var/run /opt/tmp
+
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+matches() {
+    [ -f "$PIDF" ] || return 1
+    pid=$(cat "$PIDF")
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qF -- '/opt/etc/telegram4pivas/telegram_bot.py'
+}
+rotate_log() {
+    size=$(ls -ln "$LOG" 2>/dev/null | awk '{print $5}')
+    [ "${size:-0}" -gt 5242880 ] || return 0
+    tail -c 262144 "$LOG" > "$LOG.1"
+    : > "$LOG"
+}
+start() {
+    matches && return 0
+    [ -f /opt/etc/telegram4pivas/telegram_bot_config.py ] || return 0
+    mkdir -p /opt/var/run /opt/tmp
+    rotate_log
+    PIVAS_LOCK_TOKEN= PIVAS_LOCK_ENTRY= /opt/bin/python3 /opt/etc/telegram4pivas/telegram_bot.py >>"$LOG" 2>&1 &
+    echo $! > "$PIDF"
+    sleep 1
+    matches
+}
+stop() {
+    if matches; then
+        kill "$pid" 2>/dev/null || true
+        for n in 1 2 3 4 5; do matches || break; sleep 1; done
+        matches && kill -9 "$pid" 2>/dev/null
+    fi
+    rm -f "$PIDF"
+}
+case "$1" in
+    start) start ;; stop) stop ;; restart) stop; start ;;
+    rotate) rotate_log ;;
+    status) if matches; then echo "$NAME: alive"; else echo "$NAME: dead"; exit 1; fi ;;
+    *) exit 1 ;;
+esac

@@ -1,0 +1,140 @@
+
+{
+    "log": {
+        "access": "/tmp/log/xray-access.log",
+        "error": "/tmp/log/xray-errors.log",
+        "loglevel": "error"
+    },
+    "inbounds": [
+        {
+            "tag": "pivas-main",
+            "listen": "127.0.0.1",
+            "port": "@VLESS_SSR_PORT",
+            "protocol": "socks",
+            "settings": {
+                "udp": true
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls"],
+                "routeOnly": true
+            }
+        },
+        {
+            "tag": "pivas-bot",
+            "listen": "127.0.0.1",
+            "port": 1098,
+            "protocol": "http",
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls"],
+                "routeOnly": true
+            }
+        },
+        {
+            "tag": "pivas-slot2-direct",
+            "listen": "127.0.0.1",
+            "port": 1099,
+            "protocol": "socks",
+            "settings": {
+                "udp": true
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls"],
+                "routeOnly": true
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "tag": "slot-1",
+            "protocol": "vless",
+            "settings": {
+                "vnext": [
+                    {
+                        "address": "@SLOT1_ADDRESS",
+                        "port": "@SLOT1_PORT",
+                        "users": [
+                            {
+                                "id": "@SLOT1_ID",
+                                "flow": "xtls-rprx-vision",
+                                "encryption": "none"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "@SLOT1_NETWORK",
+                "security": "reality",
+                "realitySettings": {
+                    "publicKey": "@SLOT1_PUB_KEY",
+                    "fingerprint": "@SLOT1_BROWSER_FP",
+                    "serverName": "@SLOT1_SNI",
+                    "shortId": "@SLOT1_SHORT_ID",
+                    "spiderX": "/"
+                },
+                "tcpSettings": {
+                    "header": {
+                        "type": "none"
+                    }
+                }
+            }
+        },
+        {
+            "tag": "slot-2",
+            "protocol": "vless",
+            "settings": {
+                "vnext": [
+                    {
+                        "address": "@SLOT2_ADDRESS",
+                        "port": "@SLOT2_PORT",
+                        "users": [
+                            {
+                                "id": "@SLOT2_ID",
+                                "flow": "xtls-rprx-vision",
+                                "encryption": "none"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": "@SLOT2_NETWORK",
+                "security": "reality",
+                "realitySettings": {
+                    "publicKey": "@SLOT2_PUB_KEY",
+                    "fingerprint": "@SLOT2_BROWSER_FP",
+                    "serverName": "@SLOT2_SNI",
+                    "shortId": "@SLOT2_SHORT_ID",
+                    "spiderX": "/"
+                },
+                "tcpSettings": {
+                    "header": {
+                        "type": "none"
+                    }
+                }
+            }
+        },
+        {
+            "tag": "direct",
+            "protocol": "freedom"
+        }
+    ],
+    "routing": {
+        "domainStrategy": "AsIs",
+        "rules": [
+            {
+                "type": "field",
+                "inboundTag": ["pivas-bot"],
+                "outboundTag": "slot-2"
+            },
+            {
+                "type": "field",
+                "inboundTag": ["pivas-slot2-direct"],
+                "outboundTag": "slot-2"
+            }
+        ]
+    }
+}

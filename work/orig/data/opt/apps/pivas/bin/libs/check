@@ -1,0 +1,587 @@
+#!/bin/sh
+#------------------------------------------------------------------------------
+#	ПАКЕТ ПИВАС
+#------------------------------------------------------------------------------
+#
+#	Данный файл содержит функции для проверки работы пакета Пивас
+#
+# ------------------------------------------------------------------------------
+#	Дата создания: 13/09/2022
+#	Лицензия: Apache License 2.0
+# ------------------------------------------------------------------------------------------
+
+. /opt/apps/pivas/bin/libs/main
+. /opt/apps/pivas/bin/libs/vpn
+
+NOT_IN_TABLE=false
+IPSET=$(which ipset)
+
+check_tunnel(){
+
+	dns_prov='9.9.9.9'
+	dns_tunnel=$(get_router_ip)
+	echo ''
+	for host in kinozal.tv netflix.com oaistatic.com openai.com
+	do
+		host=$(echo "$host" | sed 's/^\*//g' | tr -s ' ')
+		[ -n "${host}" ] && {
+			ready "${host}     " && is_inside_tunnel "${host}" "${dns_prov}" && when_ok 'ТУННЕЛЬ' || when_bad 'ПРОВАЙДЕР'
+			print_line
+			echo "IP провайдера [$(get_ip_list "${host}" "${dns_prov}" | tr '\n' '|' | sed 's/[|]$//' | sed 's/|$//') ]"
+			echo "IP через туннель [$(get_ip_list "${host}" "${dns_tunnel}" | tr '\n' '|' | sed 's/[|]$//' | sed 's/|$//') ]"
+			echo ''
+		}
+	done
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем прошел ли домен проверку
+#
+# ------------------------------------------------------------------------------------------
+host_vpn_pass_check() {
+	domain="${1}"; is_ok=0
+	[ -z "${domain}" ] && echo "Не задано имя хоста!" && exit 1
+
+
+	ready "Проверка домена ${domain}"
+	print_line
+	extern_ip=$(get_external_ip)
+	ip_list=$(get_iplist_from_domain "${domain}" | tr '\n' ' ' )
+	for adr in ${ip_list::-1}; do
+		${IPSET} list ${IPSET_TABLE_NAME} | grep -q "${adr}" || ${IPSET} -exist add ${IPSET_TABLE_NAME} "${adr}"
+		${IPSET} list ${IPSET_TABLE_NAME} | grep -q "${adr}" || is_ok=1
+	done
+	ip_list=$(echo "${ip_list}" | tr ' ' ', ' )
+	ready "Адреса домена [${ip_list::-2}] в списке ipset"
+	[ "${is_ok}" = 0 ] && when_ok "ЕСТЬ" || when_bad "ОТСУТСТВУЮТ"
+
+	if cmd_adguardhome_status | grep -q "ВКЛЮЧЕН"; then
+		ready "Домен в файл конфигурации adguard добавлен "
+		grep -q "${domain}" /opt/etc/AdGuardHome/AdGuardHome.yaml && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+	else
+		ready "Домен в файл конфигурации dnsmasq добавлен "
+		grep -q "${domain}" "${DNSMASQ_IPSET_HOSTS}" && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем включен ли dns-override
+#
+# ------------------------------------------------------------------------------------------
+dns_override_check() {
+	# Проверяем отключено ли использование DNS провайдера
+	dns_prov=$(curl -s "${LOCALHOST_IP}"':79/rci/opkg/dns-override')
+
+	if ! [ "${dns_prov}" = true ]; then
+	  	cli="$(get_router_host)/a"
+	#	print_line
+		echo -e "${RED}Для корректной работы DNS сервера необходимо отключить использование DNS провайдера!${NOCL}"
+		echo -e "С этой целью зайдите в админ панель роутера по адресу: ${GREEN}${cli}${NOCL}"
+		echo "и выполните последовательно три следующих команды: "
+		print_line
+		echo -e "1. ${GREEN}opkg dns-override ${NOCL}           - отключаем использование DNS провайдера,"
+		echo -e "2. ${GREEN}system configuration save ${NOCL}   - сохраняем изменения,"
+		echo -e "3. ${GREEN}system reboot ${NOCL}               - перегружаем роутер."
+		print_line
+		exit 1
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем работу dnsmasq
+#
+# ------------------------------------------------------------------------------------------
+dnsmasq_check() {
+
+	[ -f /opt/etc/init.d/S56dnsmasq ] && {
+	
+		! [ -f "${DNSMASQ_IPSET_HOSTS}" ] && /opt/apps/pivas/bin/main/dnsmasq &> /dev/null
+		ready "Состояние службы dnsmasq"
+		if /opt/etc/init.d/S56dnsmasq status | grep -q alive ; then
+			when_ok "ЗАПУЩЕНА"
+		else
+			when_bad "ОСТАНОВЛЕНА"
+			ready "Перезапускаем еще раз dnsmasq"
+			if /opt/etc/init.d/S56dnsmasq restart &> /dev/null; then
+				when_ok "УСПЕШНО"
+			else
+				when_bad "ОШИБКА"
+				error "Запустите диагностику командой pivas debug"
+				exit 1
+			fi
+		fi
+		port=$(get_config_value DNSMASQ_PORT)
+		ready "Отслеживание порта #${port} сервисом dnsmasq"
+		if netstat -ltunp 2> /dev/null | grep -E "(${port}|dnsmasq)" &> /dev/null; then
+			when_ok "СЛЕДИМ"
+		else
+			when_bad "НЕТ ЗАПИСИ"
+			exit 1
+		fi
+	}
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем работу vpn
+#
+# ------------------------------------------------------------------------------------------
+vpn_check(){
+
+	vpn_cli_desc=$(get_current_vpn_interface "cli_desc")
+	vpn_cli=$(get_current_vpn_interface "cli")
+#	если выбрано vpn подключение отличное от shadowsocks
+	if ! [ "${vpn_cli}" = 'shadowsocks' ]; then
+		connected=$(is_vpn_interface_connected "${vpn_cli}")
+		ready "Состояние vpn соединения ${vpn_cli_desc}"
+		if [ "${connected}" = 'on' ]; then
+			when_ok "ПОДКЮЧЕНО"
+
+			ready "Таблица VPN маршрутов id=1001"
+			/opt/etc/ndm/fs.d/100-vpn start
+			if /opt/sbin/ip route show table 1001 | grep -qv 'default'; then
+				when_ok "ЗАПОЛНЕНА"
+
+				ready "Таблица VPN маршрутов id=1001 в правилах маркировки "
+				if [ -n "$(/opt/sbin/ip rule show | grep 1001)" ]; then
+					when_ok "ПРИСУТСТВУЕТ"
+
+					ready "Правила маркировки трафика в iptable"
+					/opt/etc/ndm/netfilter.d/100-vpn-mark
+					if [ "$(save_iptables | grep -c "${VPN_IPTABLES_CHAIN}")" -ge 2 ]; then
+						when_ok "ДОБАВЛЕНЫ"
+					else
+						when_bad "ОТСУТСТВУЮТ"
+						error "Запустите диагностику командой pivas debug"
+						exit 1
+					fi
+				else
+					when_bad "ОТСУТСТВУЕТ"
+					error "Запустите диагностику командой pivas debug"
+					exit 1
+				fi
+			else
+				when_bad "ПУСТА"
+				error "Запустите диагностику командой pivas debug"
+				exit 1
+			fi
+		else
+			when_bad "ОСТАНОВЛЕНО"
+			ready "Перезапускаем еще раз vpn соединение ${vpn_cli_desc}"
+			curl -s -d '{"up":"false"}' "${LOCALHOST_IP}:79/rci/interface/${vpn_cli}" &>/dev/null
+			sleep 1
+			curl -s -d '{"up":"true"}' "${LOCALHOST_IP}:79/rci/interface/${vpn_cli}" &>/dev/null
+			connected=$(is_vpn_interface_connected "${vpn_cli}")
+			if [ "${connected}" = 'on' ]; then
+			# if [ -n "$(echo "${status}" | grep 'interface is up.' )" ]; then
+				when_ok "ПОДКЮЧЕНО"
+			else
+				when_bad "ОШИБКА"
+				error "Запустите диагностику командой pivas debug"
+				exit 1
+			fi
+		fi
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем работу shadowsocks
+#
+# ------------------------------------------------------------------------------------------
+shadowsocks_check() {
+	vpn_cli=$(get_current_vpn_interface "cli")
+	if [ "${vpn_cli}" = 'shadowsocks' ]; then
+
+		ready "Состояние службы shadowsocks"
+		if /opt/etc/init.d/S22shadowsocks status &> /dev/null; then
+			when_ok "ЗАПУЩЕНА"
+		else
+			when_bad "ОСТАНОВЛЕНА"
+			ready "Перезапускаем еще раз shadowsocks"
+			if /opt/etc/init.d/S22shadowsocks restart &> /dev/null; then
+				when_ok "УСПЕШНО"
+			else
+				when_bad "ОШИБКА"
+				error "Запустите диагностику командой pivas debug"
+				exit 1
+			fi
+		fi
+
+		port=$(cat < '/opt/etc/shadowsocks.json' | sed 's/^\(.*\)\(#.*\)/\2/; /^#/d; /^$/d' | grep local_port | cut -d':' -f2 | tr -d ' ,')
+		ready "Отслеживание порта #${port} shadowsocks "
+		if netstat -ltunp 2> /dev/null | grep ':'"${port}" &> /dev/null; then
+			when_ok "СЛЕДИМ"
+		else
+			when_bad "НЕТ ЗАПИСИ"
+			exit 1
+		fi
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем работу dnscrypt-proxy
+#
+# ------------------------------------------------------------------------------------------
+dnscrypt_proxy_check() {
+
+	if [ "$(get_dns_crypt_status)" = on ]; then
+		print_line
+		ready "Состояние службы dnscrypt-proxy2"
+		if /opt/etc/init.d/S09dnscrypt-proxy2 status &> /dev/null; then
+			when_ok "ЗАПУЩЕНА"
+		else
+			when_bad "ОСТАНОВЛЕНА"
+			ready "Перезапускаем еще раз dnscrypt-proxy2"
+			if /opt/etc/init.d/S09dnscrypt-proxy2 restart &> /dev/null; then
+				when_ok "ЗАПУЩЕНА"
+			else
+				when_bad "ОШИБКА"
+				error "Запустите диагностику командой pivas debug"
+				exit 1
+			fi
+		fi
+
+		port=$(cat < "/opt/etc/dnscrypt-proxy.toml" | grep -vE "^#" | grep -E 'listen_addresses.=' | cut -d":" -f4)
+		ready "Отслеживание порта #${port::-2} dnscrypt-proxy2 "
+		if netstat -ltunp 2> /dev/null | grep 'dnscrypt' &> /dev/null; then when_ok "СЛЕДИМ"; else
+			when_bad "НЕТ ЗАПИСИ"
+			exit 1
+		fi
+	else
+		ready "Шифрование DNS посредством dnscrypt-proxy2"
+		when_bad "ОТКЛЮЧЕНО"
+	fi
+
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем работу iptable
+#
+# ------------------------------------------------------------------------------------------
+iptable_check() {
+	ready "Наличие правил защиты в iptable"
+	count_local_nets=$(cat < "${EXCLUDED_NET_FILE}" | wc -l)
+	count_ip4tables_rules=$(save_iptables \
+		| grep -E "${IPSET_TABLE_NAME}|${VPN_IPTABLES_CHAIN}|${SSR_IPTABLES_CHAIN}" \
+		| grep -c '\-A')
+
+	if [ "${count_ip4tables_rules}" -gt "${count_local_nets}" ] ; then
+		when_ok "ЕСТЬ"
+	else
+		when_bad "ПРАВИЛ НЕТ"
+		if has_ssr_enable; then
+			export type=iptables; export table=mangle && /opt/etc/ndm/netfilter.d/100-proxy-redirect &> /dev/null
+		else
+			cmd_vpn_iptable_flush
+			ip4set_create_table
+			ip4_mark_vpn_network
+		fi
+		ready "Повторная проверка правил защиты в iptable"
+		if save_iptables | grep -qE "${IPSET_TABLE_NAME}|${VPN_IPTABLES_CHAIN}|${SSR_IPTABLES_CHAIN}";  then
+			when_ok "ПРОЙДЕНА"
+		else
+			when_bad "ОШИБКА"
+			if has_ssr_enable; then
+				script=/opt/etc/ndm/netfilter.d/100-proxy-redirect
+			else
+				script=/opt/etc/ndm/netfilter.d/100-vpn-mark
+			fi
+			error "Проверьте работу скрипта ${script}"
+			exit 1
+		fi
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем работу ipset
+#
+# ------------------------------------------------------------------------------------------
+ipset_check() {
+	ready "Заполнение ipset таблицы скриптами ПИВАСа"
+	if ! [ -f "${PIVAS_LIST_FILE}" ] || \
+	[ "$(grep -vcE '^$|#' "${PIVAS_LIST_FILE}" )" -eq 0 ] ; then
+		cp /opt/apps/pivas/etc/conf/pivas.list "${PIVAS_LIST_FILE}"
+	fi
+	ip4set_create_table
+	sleep 3
+	/opt/apps/pivas/bin/main/ipset &> /dev/null
+	if ipset list "${IPSET_TABLE_NAME}" | grep -vEi '^[a-z]' &> /dev/null; then
+		when_ok "ЗАПОЛНЕНА"
+	else
+		when_bad "ПУСТАЯ"
+		ipset_flush &> /dev/null
+		/opt/apps/pivas/bin/main/ipset &> /dev/null
+		ready "Повторная проверка заполнения ipset таблицы"
+		if ipset list "${IPSET_TABLE_NAME}" | grep -vEi '^[a-z]' &> /dev/null; then
+			when_ok "ПРОЙДЕНА"
+		else
+			when_bad "ОШИБКА"
+			error "Проверьте работу скрипта /opt/apps/pivas/bin/main/ipset"
+			exit 1
+		fi
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем заполнение pivas.dnsmasq
+#
+# ------------------------------------------------------------------------------------------
+pivas_dnsmasq_check() {
+	ready "Список правил ipset для dnsmasq"
+	if [ "$(cat < "${DNSMASQ_IPSET_HOSTS}" | wc -l)" -gt 0 ]; then
+		when_ok "ЗАПОЛНЕН"
+	else
+		when_bad "ПУСТ"
+		/opt/apps/pivas/bin/main/dnsmasq
+		ready "Повторная проверка заполнения списка правил ipset для dnsmasq"
+		if [ "$(cat < "${DNSMASQ_IPSET_HOSTS}" | wc -l)" -gt 0 ]; then
+			when_ok "ПРОЙДЕНА"
+		else
+			when_bad "ОШИБКА"
+			print_line
+			if [ "$(cat < "${PIVAS_LIST_FILE}" | wc -l)" -gt 0 ]; then
+				error "Белый список пуст - /opt/etc/pivas.list"
+				warning "Добавьте туда хосты командой ${BLUE}pivas add host.com"
+			else
+				error "Проверьте работу скрипта/opt/apps/pivas/bin/main/dnsmasq"
+			fi
+			print_line
+			exit 1
+		fi
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем заполнение adguard правилами ipset
+#
+# ------------------------------------------------------------------------------------------
+cmd_adguard_check() {
+	exit_when_dnsmasq_on status; [ "${status}" = 0 ] && {
+		ready "Список правил ipset для AdGuard Home"
+		if [ "$(cat < "${ADGUARD_IPSET_FILE}" | wc -c)" -gt 6 ]; then
+			when_ok "ЗАПОЛНЕН"
+			echo_debug "Журнал загрузки AdGuard Home (20 крайних записей)\nиз файла ${ADGUARDHOME_LOG}" "$(cat < "${ADGUARDHOME_LOG}" | tail )"
+		else
+			when_bad "ПУСТ"
+			/opt/apps/pivas/bin/main/adguard &> /dev/null
+			ready "Повторная проверка заполнения списка правил ipset для AdGuard Home"
+			if [ "$(cat < "${ADGUARD_IPSET_FILE}" | wc -c)" -gt 6 ]; then
+				when_ok "ПРОЙДЕНА"
+			else
+				when_bad "ОШИБКА"
+				print_line
+				if [ "$(cat < "${PIVAS_LIST_FILE}" | wc -l)" -gt 0 ]; then
+					error "Белый список пуст - /opt/etc/pivas.list"
+					warning "Добавьте в него хосты командой ${BLUE}pivas add имя_домена${NOCL}"
+				else
+					error "Проверьте работу скрипта/opt/apps/pivas/bin/main/adguard"
+				fi
+				print_line
+				exit 1
+			fi
+		fi
+	}
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем заполнение adblock.dnsmasq
+#
+# ------------------------------------------------------------------------------------------
+adblock_dnsmasq_check() {
+	if cat < '/opt/etc/dnsmasq.conf' | sed 's/^\(.*\)\(#.*\)/\2/; /^#/d; /^$/d' | grep "adblock.dnsmasq" &> /dev/null; then
+		ready "Список блокировки рекламы"
+		if [ "$(cat </opt/etc/adblock.dnsmasq | wc -l)" -gt 0 ]; then
+			when_ok "ЗАПОЛНЕН"
+		else
+			when_bad "ПУСТ"
+			warning "Заполняем список блокировки рекламы принудительно "
+			print_line
+			/opt/apps/pivas/bin/main/adblock
+			ready "Перезапуск службы dnsmasq"
+			/opt/etc/init.d/S56dnsmasq restart &> /dev/null
+			[ $? = 0 ] && when_ok "УСПЕШНО" || when_bad "ОШИБКА"
+
+			ready "Повторная проверка заполнения списка блокировки рекламы"
+			if [ "$(cat </opt/etc/adblock.dnsmasq | wc -l)" -gt 0 ]; then
+				when_ok "ПРОЙДЕНА"
+			else
+				when_bad "ОШИБКА"
+				error "Проверьте работу скрипта /opt/bin/update_adblock"
+				exit 1
+			fi
+		fi
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Возвращаем статус подключения к интернету
+#
+# ------------------------------------------------------------------------------------------
+is_not_internet_connected(){
+	status=$(curl -s "${LOCALHOST_IP}:79/rci/show/internet/status" | grep internet )
+	echo "${status}" | grep -q false
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Формируем лог отладочной информации
+#
+# ------------------------------------------------------------------------------------------
+internet_check() {
+	if is_not_internet_connected; then
+		when_bad "Выявлены проблемы с интернет подключением" "${status}"
+		when_ok "Перезапускаем основное соединение c провайдером (ISP)!"
+		reset_ISP_connection
+		if is_not_internet_connected; then
+			when_bad "К сожалению, перезапуск соединения не помог."
+			answer=''; read_ynq_timer "Рекомендуется сделать перезагрузку роутера. Перегрузить?" answer N 6
+			if [ "${answer}" = q ] ; then exit_q; print_line; exit 1; fi
+			echo "${answer}" | grep -qi y && reboot
+		fi
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем наличие самого списочного файла и число записей в нем
+#
+# ------------------------------------------------------------------------------------------
+hosts_list_check(){
+	{ ! [ -f "${PIVAS_LIST_FILE}" ] || [ "$(cat < "${PIVAS_LIST_FILE}" | wc -l)" = 0 ];} && {
+		warning "Файл защищенного списка не существует"
+		warning "Создаем новый, но c одним хостом для проверки: myip2.ru"
+		print_line
+		pivas add myip2.ru
+	}
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем заполнение ipset таблицы при посещении сайта
+#
+# ------------------------------------------------------------------------------------------
+ipset_site_visit_check() {
+	echo -e "${RED}ВНИМАНИЕ, прежде, чем приступить к дальнейшим действиям${NOCL}, сделайте следующее:"
+	echo "1. Очистите кеш на Ваших клиентах, которые подключены к роутеру:"
+	echo -e "\t${BLUE}macOS  : ${YELLOW}sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder${NOCL}"
+	echo -e "\t${BLUE}Linux  : ${YELLOW}sudo systemd-resolve --flush-caches или sudo resolvectl flush-caches${NOCL}"
+	echo -e "\t${BLUE}Windows: ${YELLOW}ipconfig /flushdns${NOCL}"
+	echo "2. Обязательно проверьте, что адрес DNS клиента идентичен адресу вашего роутера!"
+	echo "3. Далее, очистите все куки в бразуре, в котором хотите увидеть результат!"
+	print_line
+	echo "Для продолжения нажмите на любую клавишу."
+	print_line
+	pause
+	echo -e  "${GREEN}Проверяем заполнения ipset таблицы при посещении сайта.${NOCL}"
+	print_line
+	echo "Сейчас, для проверки заполнения, откройте на компьютере браузер"
+	echo -e "Затем зайдите на сайт ${BLUE}https://ifconfig.me${NOCL} в режиме ${RED}ИНКОГНИТО.${NOCL}"
+	echo -e "На странице должен появиться ${BLUE}IP Вашего VDS/VPN провайдера${NOCL}."
+	echo -n "После чего вновь перейдите сюда и нажмите на любую клавишу."
+	pause
+	
+	#  Проверяем наличие в защищенном списке ifconfig.me
+	grep -q ifconfig.me ${PIVAS_LIST_FILE} || {
+		# если домена в списке нет, то добавляем его
+		cmd_add_one_host ifconfig.me no '' &> /dev/null
+	}
+
+
+	/opt/apps/pivas/bin/main/ipset &> /dev/null
+	print_line
+	ready "Таблица ipset"
+	if ipset list ${IPSET_TABLE_NAME} | grep -vqEi '^[a-z]'; then
+		when_ok "ЗАПОЛНЕНА"
+	else
+		when_bad "ПУСТА"
+		print_line
+		warning "Попробуйте запустить тест снова и/или обратитесь к документации:"
+		warning "/opt/apps/pivas/etc/conf/pivas.help"
+	fi
+#	print_line
+
+}
+
+cmd_test_warning() {
+	echo 'Данная команда ещё не обновлена под новую версию Пиваса.'
+	echo 'Предыдущая может сообщать не верную информацию или даже что-нибудь не верно обновить.'
+	echo 'Если всё равно хотите ей воспользоваться, вызовите pivas test_old'
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Проверяем работу всех сервисов pivas
+#
+# ------------------------------------------------------------------------------------------
+cmd_state_checker() {
+#	проверяем интернет
+	internet_check
+#	Проверяем включен ли dns-override (отключены ли DNS провайдера)
+	# dns_override_check
+#	Проверяем наличие самого списочного файла и число записей в нем
+	hosts_list_check
+# Проверяем подключен ли AdGuard Home
+	adguardhome_status=$(cmd_adguardhome_status)
+	if echo "${adguardhome_status}" | grep -q ВКЛЮЧЕН ; then
+#		AdGuard Home включен
+		echo "${adguardhome_status}"
+		cmd_adguard_check
+	else
+#		AdGuard Home отключен
+#		Проверяем работу dnsmasq
+		dnsmasq_check
+#		Проверяем работу dnscrypt_proxy
+		dnscrypt_proxy_check
+# 		Проверяем работу блокировки рекламы
+		adblock_dnsmasq_check
+	fi
+	print_line
+#	По наличию файла ниже определяем наличие использования shadowsocks
+	if has_ssr_enable; then
+#		Проверяем работу shadowsocks
+		shadowsocks_check
+		export type=iptables; export table=mangle && /opt/etc/ndm/netfilter.d/100-proxy-redirect
+	else
+#		Проверяем работу vpn подключения
+		vpn_check
+		ip4_mark_vpn_network
+	fi
+	print_line
+#	Проверяем правила в таблице iptable
+	iptable_check
+#	Проверяем таблицу ipset
+	# ipset_check
+	print_line
+#
+#	Проверка наличия ip адресов хостов в таблице ipset - попытка номер раз
+	pivas_list_ipset_check
+	if [ "${NOT_IN_TABLE}" = true ]; then
+		print_line
+#		если хотя бы один из адресов не находится в таблице, то делаем проверку повторно
+		cmd_pivas_init
+		print_line
+		warning "Пробуем запустить повторно."
+		print_line
+#		Проверка наличия ip адресов хостов в таблице ipset
+		pivas_list_ipset_check
+		NOT_IN_TABLE=false
+	fi
+	print_line
+	# При активном флаге не будет выполняться функция ipset_site_visit_check 
+	# и тест будет завершаться без участия пользователя
+	[ "${1}" = '--no-check'  ] || [ "${1}" = '-fast' ] || ipset_site_visit_check
+#	print_line
+#	check_tunnel
+
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Очищаем ipset таблицу
+#
+# ------------------------------------------------------------------------------------------
+ipset_flush() {
+	ipset flush ${IPSET_TABLE_NAME}
+	#  	ipset flush pivas6
+}

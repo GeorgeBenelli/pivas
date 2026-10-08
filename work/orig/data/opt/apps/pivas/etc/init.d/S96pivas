@@ -1,0 +1,46 @@
+#!/bin/sh
+
+# All state writers share one lock; nested calls retain its owner token.
+if [ "${PIVAS_LOCK_ENTRY:-}" != "$0" ]; then
+    exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py locked "$0" "$@"
+fi
+unset PIVAS_LOCK_ENTRY
+
+
+#------------------------------------------------------------------------------
+#
+#	ПАКЕТ ПИВАС
+#
+#------------------------------------------------------------------------------
+#
+#	Данный файл служит для начального запуска пакета пивас при загрузке системы
+#	https://github.com/ndmsystems/packages/wiki/Opkg-Component с командой start
+#	основными задачами являются:
+#
+#	1. Создание таблицы ipset ip4
+#	2. Загрузка таблицы ipset доменными именами
+#
+# ------------------------------------------------------------------------------
+#	Дата создания: 21/05/2022
+#	Лицензия: Apache License 2.0
+# ------------------------------------------------------------------------------
+
+case ${1} in
+	start|restart)
+		# Entware starts dnsmasq before this service. A paused Pivas must not
+		# leave its separate DNS listener running after a router reboot.
+		if [ -f /opt/etc/pivas.paused ]; then
+			/opt/etc/init.d/S56dnsmasq stop >/dev/null 2>&1 || true
+			exit 0
+		fi
+		. /opt/apps/pivas/bin/libs/vpn
+		cmd_pivas_init no
+		if has_ssr_enable; then
+			while /opt/etc/init.d/S22shadowsocks status | grep -q dead
+			do
+				/opt/etc/init.d/S22shadowsocks restart
+				sleep 2
+			done
+		fi
+	;;
+esac

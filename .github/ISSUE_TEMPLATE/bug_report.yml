@@ -1,0 +1,33 @@
+name: Ошибка
+description: Ошибка установки или работы Pivas
+title: "[Ошибка] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Не отправляйте токены, пароли, рабочие ссылки, конфиги роутера и резервные копии. Диагностику предварительно проверьте."
+  - type: input
+    id: environment
+    attributes:
+      label: Модель, KeeneticOS и архитектура Entware
+      placeholder: "KN-xxxx, KeeneticOS x.x, aarch64-3.10"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версия Pivas и тип установки
+      placeholder: "custom31, pivas-full"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Шаги, ожидаемый и фактический результат
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Проверки и обезличенные фрагменты журнала
+      description: "Результат pivas status / pivas vless ping; указать транспорт без рабочей ссылки."

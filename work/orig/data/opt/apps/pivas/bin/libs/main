@@ -1,0 +1,1449 @@
+#!/bin/sh
+# ------------------------------------------------------------------------------------------
+#
+# 	ПРОЕКТ ПИВАС
+#
+# ------------------------------------------------------------------------------------------
+# 	Данный файл служит основной библиотекой функций пакета ПИВАС
+# ------------------------------------------------------------------------------------------
+#	Дата: 21/05/2022
+#	Лицензия: Apache License 2.0
+# ------------------------------------------------------------------------------------------
+RED="\033[1;31m";
+GREEN="\033[1;32m";
+BLUE="\033[36m";
+YELLOW="\033[33m";
+NOCL="\033[m";
+QST="${RED}?${NOCL}"
+
+DATE_FORMAT='+%d/%m/%Y %H:%M:%S'
+# ------------------------------------------------------------------------------------------
+#	Вспомогательные переменные для работы скрипта
+# ------------------------------------------------------------------------------------------
+# Вычисляем текущую ширину экрана для печати линий определенной ширины
+length=$(stty size 2>/dev/null | cut -d' ' -f2)
+
+[ -n "${length}" ] && [ "${length}" -gt 80 ] && LENGTH=$((length*2/3)) || LENGTH=68
+
+PROGRESS_BAR_WIDTH=$((LENGTH-5))  # progress bar length in characters
+
+PIVAS_BACKUP_PATH=/opt/etc/.pivas/backup
+IPSET_TABLE_NAME=PIVAS_LIST
+SSR_NAME=ss-redir
+SSR_CMD=/opt/bin/${SSR_NAME}
+# ssr_run()(/opt/bin/sslocal --protocol redir -c /opt/etc/shadowsocks.json ${@}) )
+ssr_run(){ /opt/bin/ss-redir -c /opt/etc/shadowsocks.json ${@} ;}
+
+save_iptables(){ /opt/sbin/iptables-save ${@}; }
+
+PIVAS_CONF_FILE=/opt/etc/pivas.conf
+PIVAS_LIST_FILE=/opt/etc/pivas.list
+ADGUARDHOME_CONFIG=/opt/etc/AdGuardHome/AdGuardHome.yaml
+ADGUARD_IPSET_FILE=/opt/etc/AdGuardHome/pivas.ipset
+SHADOWSOCKS_CONF=/opt/etc/shadowsocks.json
+DNSMASQ_IPSET_HOSTS=/opt/etc/dnsmasq.d/pivas.dnsmasq
+DNSMASQ_CONFIG=/opt/etc/dnsmasq.conf
+DNSCRYPT_CONFIG=/opt/etc/dnscrypt-proxy.toml
+ADBLOCK_LIST_EXCEPTION=/opt/etc/adblock/exception.list
+ADBLOCK_HOSTS_FILE=/opt/etc/adblock/ads.pivas.list
+ADBLOCK_SOURCES_LIST=/opt/etc/adblock/sources.list
+
+PIVAS_CONFIG_BACKUP=${PIVAS_BACKUP_PATH}/pivas.conf
+PIVAS_LIST_FILE_BACKUP=${PIVAS_BACKUP_PATH}/pivas.list
+ADGUARDHOME_CONFIG_BACKUP=${PIVAS_BACKUP_PATH}/AdGuardHome.yaml
+ADGUARD_IPSET_FILE_BACKUP=${PIVAS_BACKUP_PATH}/pivas.ipset
+SHADOWSOCKS_CONF_BACKUP=${PIVAS_BACKUP_PATH}/shadowsocks.json
+DNSMASQ_IPSET_HOSTS_BACKUP=${PIVAS_BACKUP_PATH}/pivas.dnsmasq
+DNSMASQ_CONFIG_BACKUP=${PIVAS_BACKUP_PATH}/dnsmasq.conf
+DNSCRYPT_CONFIG_BACKUP=${PIVAS_BACKUP_PATH}/dnscrypt-proxy.toml
+ADBLOCK_LIST_EXCEPTION_BACKUP=${PIVAS_BACKUP_PATH}/exception.list
+ADBLOCK_HOSTS_FILE_BACKUP=${PIVAS_BACKUP_PATH}/ads.pivas.list
+ADBLOCK_SOURCES_LIST_BACKUP=${PIVAS_BACKUP_PATH}/sources.list
+
+ADGUARDHOME_LOG=/opt/var/log/AdGuardHome.log
+ADGUARDHOME_DEMON=/opt/etc/init.d/S99adguardhome
+DNSMASQ_DEMON=/opt/etc/init.d/S56dnsmasq
+DNSCRYPT_DEMON=/opt/etc/init.d/S09dnscrypt-proxy2
+HOME_PATH=/opt/apps/pivas
+
+
+
+ADS_MAIN_SCRIPT=/opt/apps/pivas/bin/main/adblock
+APP_NAME=pivas
+INSTALL_LOG=/opt/tmp/pivas.install.log
+CRONTAB_FILE=/opt/etc/crontab
+UPDATE_BIN_FILE=/opt/apps/pivas/bin/main/update
+DNS_LOCAL_DEMON_FILE=/opt/etc/ndm/netfilter.d/100-dns-local
+# Флаг «pivas stop»: DNS-перехват PIVAS_DNS выключен, хук его не возвращает.
+PIVAS_PAUSE_FLAG=/opt/etc/pivas.paused
+IPSET_REDIRECT_DEMON_FILE=/opt/etc/ndm/netfilter.d/100-proxy-redirect
+INFACE_NAMES_FILE=/opt/etc/inface_equals
+PIVAS_START_FILE=/opt/etc/init.d/S96pivas
+
+# VLESS over Proxy
+PROXY_INFACE_NUMEBER=21
+PROXY_VLESS_NAME=Proxy${PROXY_INFACE_NUMEBER}
+
+# Файл с сетями, запросы к которым не должны попадать в тоннель
+# Данный файл постоянен, не доступен пользователям на редактирование
+# https://en.wikipedia.org/wiki/Reserved_IP_addresses
+FILE_RESERVED=/opt/apps/pivas/etc/conf/reserved.ip
+
+IP_FILTER='[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
+IP_DEVICE_FILTER='[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[1-9]{1,3}' # на конце любая цифра, кроме 0
+IP_PORT_FILTER="[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[1-9]{1,3}[:#][0-9]{2,5}" # на конце любая цифра, кроме 0
+NET_FILTER='[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,3}'
+
+get_regexp_ip_or_range() {
+	echo "^(${IP_FILTER}|${IP_FILTER}-${IP_FILTER}|${IP_FILTER}/[0-9]{1,2})$"
+}
+
+get_regexp_ip_with_or_without_port() {
+	echo "^(${IP_FILTER}|${IP_PORT_FILTER})$"
+}
+
+ERROR_LOG_FILE=/opt/tmp/pivas.err.log
+APP_NAME_DESC=ПИВАС
+
+MAIN_DNS_PORT=9753
+LOCALHOST_IP=127.0.0.1
+INFACE_REQUEST="${LOCALHOST_IP}:79/rci/show/interface"
+INFACE_PART_REQUEST="${LOCALHOST_IP}:79/rci/interface"
+SSR_ENTWARE_TEMPL=ezcfg
+MINUS=9
+
+
+#-------------------------------------------------------------------------------
+# 
+#	Функция проверяет установку пакета libmbedtls
+# 
+#-------------------------------------------------------------------------------
+
+check_crypto_ssr_libs(){
+
+	[ -f /opt/lib/libmbedcrypto.so.16 ] || {
+		opkg install libmbedtls &> /dev/null
+		local libmbedcrypto=$(find /opt/lib/ -type f -name "libmbedcrypto.so*" | head -1)
+		[ -n "${libmbedcrypto}" ] && ln -sf "${libmbedcrypto}" /opt/lib/libmbedcrypto.so.16
+	}
+		
+}
+
+#	Функция производит действия над определенными службами в фоне (демонами)
+# 
+#-------------------------------------------------------------------------------
+service_action(){
+
+	local _service=${1}
+	local _action=${2:-stop}
+	
+	# если нет демона - выходим
+	[ -z "${_service}" ] && return 1
+	# если демон есть - выполняем действия
+	find /opt/etc/init.d/ -name *"${_service}"*  -exec {} start \; &> /dev/null && return 0 || return 1
+
+}
+
+
+#-------------------------------------------------------------------------------
+# 
+#	Функция отправляет запросы к API Keenetic
+# 
+#-------------------------------------------------------------------------------
+post_api_query(){
+	local _query=${1}
+	local _data=${2:-}
+	local _result
+
+	if [ -z "${_data}" ]; then 
+		curl -s "localhost:79/rci/${_query}" && _result=true || _result=false
+	else
+		curl -s -d "${_data}" "localhost:79/rci/${_query}" && _result=true || _result=false
+	fi
+	return ${result}
+}
+#-------------------------------------------------------------------------------
+# 
+#	Функция которая экранирует спец символы для sed
+# 
+#-------------------------------------------------------------------------------
+escape_sed() {
+	printf '%s' "$1" | sed -e 's/[][\/.^$*{}|]/\\&/g'
+}
+
+
+is_dns_server_online(){
+#---------------------------------------------------------------------------------
+#   Проверяем соединение с DNS сервером на указанном порту
+#   $1 - имя DNS сервера вместе с номером порта через #
+# 	пример: 8.8.8.8#53
+#---------------------------------------------------------------------------------
+
+    local dns_port=$(echo "${1/#/:}" | cut -d ":" -f2 )
+    netstat -tunpxl | grep -q ":${dns_port} "
+}
+
+dns__get_ips_by_domain() {
+	if [ -z "${1}" ]; then
+		error "[${FUNCNAME}] Не передан обязательный параметр — имя домена"
+		return
+	fi
+	local host=${1}
+
+	local dns_server=$(get_config_value DNS_DEFAULT)
+	if ! is_ip_private $(echo "${dns_server}" | grep -Eo "${IP_FILTER}") ; then
+		# если это внешний нешифрованный DNS, то лучше отправим запрос через DNSCrypt
+		dns_server="127.0.0.1#$(get_config_value DNS_CRYPT_PORT)"
+	fi
+
+	get_iplist_from_domain "${host}" "${dns_server}" | grep -Eo "${IP_FILTER}" | grep -v '0.0.0.0'
+}
+
+ipset__fill_by_domain() {
+	if [ -z "${1}" ]; then
+		error "[${FUNCNAME}] Не передан обязательный параметр — имя домена"
+		return
+	fi
+	# удаление * если есть
+	host=${1//\*/}
+
+	local ip_list=$( dns__get_ips_by_domain "${host}" )
+	if [ -z "${ip_list}" ]; then
+		return
+	fi
+
+	IFS=$'\n'
+	for domain_ip in ${ip_list}; do
+		# если уже есть в списке
+		if ipset list "${IPSET_TABLE_NAME}" | grep -qE "^${domain_ip} " ; then
+			continue
+		fi
+
+		log_warning "Добавление в IPSet ${IPSET_TABLE_NAME} ${domain_ip} домена ${host}"
+		/opt/sbin/ipset -exist add "${IPSET_TABLE_NAME}" "${domain_ip}"
+	done
+}
+
+# доступность DNS сервера
+DNS_ENABLE=false
+DNS_DEFAULT=''
+
+get_iplist_from_domain(){
+#---------------------------------------------------------------------------------
+#   Получаем список всех ip по доменному имени
+#   $1 - доменное имя
+#   $2 - имя DNS сервера вместе с номером порта через #
+#   $3 - количество попыток
+#---------------------------------------------------------------------------------
+
+	[ -z "${DNS_DEFAULT}" ] && DNS_DEFAULT=$(get_config_value DNS_DEFAULT)
+
+    local host=${1}
+    local dns_server=${2:-${DNS_DEFAULT}}
+    local retry=${3:-3}
+
+	# Проверяем доступность DNS сервера
+    if [ ${DNS_ENABLE} = fasle ]; then
+		if is_dns_server_online ${dns_server} ; then 
+			DNS_ENABLE=true
+		else
+			DNS_ENABLE=false
+			echo "DNS сервер ${dns_server/#*/} не доступен на ${dns_server/*#/} порту."
+			exit 1
+		fi
+    fi
+
+	local all_ip_list=''
+	# Получаем список ip
+    for dns_try in $(seq 1 "${retry}"); do
+		# Пытаемся получить список ip
+        ip_list=$(kdig +retry=3 +timeout=1 +short ${host} "@$dns_server" 2>/dev/null)
+        # если список пустой - переходим дальше по циклу
+		[ -z "$ip_list" ] && continue
+        for ip in ${ip_list}; do
+			
+			# если при запросе ip мы получаем другие хосты, то 
+			host=$(echo "${ip}" | grep -Ev "${IP_FILTER}" | sed 's/\.$//') 
+			[ -z "${host}" ] || get_iplist_from_domain "${host}" "${dns_server}" || continue
+
+			# Проверяем, что ip не 0.0.0.0 и что его нет в списке ip_list
+            sep='\n'; [[ "${all_ip_list//timeout*/}" =~ ${ip} ]] || {
+                [ -z "${all_ip_list}" ] && sep=''
+				# Добавляем ip в список, при прохождении всех условий
+                all_ip_list="$(printf "%s${sep}%s" "${all_ip_list}" "${ip}" \
+					| grep -Eo "${IP_FILTER}" | grep -v '0.0.0.0')"
+            }
+        done
+		# Выходим из цикла если список имеет значение
+		[ -n "$all_ip_list" ] && break
+        # echo "${dns_try} ${ip_list/\n/ /}"
+    done
+
+	# Возвращаем список ip
+    echo "${all_ip_list}"
+}
+
+
+exit_when_no_internet_or_vpn(){
+#---------------------------------------------------------------------------------
+#   Проверяем работу интернета и VPN
+#---------------------------------------------------------------------------------
+	local cli_inface=$(get_current_vpn_interface cli)
+	has_no_internet_here && {
+		error "Интернет недоступен. Продолжение невозможно." nl
+		print_line
+		exit 1
+	}
+	
+	is_interface_online "${cli_inface}" || {
+		error "VPN интерфейс ${cli_inface} недоступен. Продолжение невозможно." nl
+		print_line
+		exit 1
+	}
+}
+
+has_no_internet_here(){
+#---------------------------------------------------------------------------------
+#   Проверяем работу интерненета по всем возможным параметрам
+#---------------------------------------------------------------------------------
+
+#	Если в возвращаемых аргументах нет false значит интернет присутствует
+	# status=$(curl -s "localhost:79/rci/show/internet/status" | jq -r 'select(.enabled==true and .reliable==true and ."gateway-accessible"==true and ."captive-accessible"==true and ."dns-accessible"==true and .internet==true)')
+	curl -s "localhost:79/rci/show/internet/status" \
+		| grep -E 'gateway-accessible|dns-accessible|internet|captive-accessible' \
+		| grep -q false
+}
+
+#---------------------------------------------------------------------------------
+# Проверяем работу заданного VPN CLI интерфейса
+# $1 - VPN интерфейс в терминах CLI (например OpenVPN0)
+#---------------------------------------------------------------------------------
+is_interface_online() {
+	if [ -z "${1}" ] ; then
+		error "[${FUNCNAME}] Не передан обязательный параметр — Keenetic-имя"
+		return
+	fi
+	local keenetic_name="${1}"
+
+	if [ "${keenetic_name}" == 'shadowsocks' ]; then
+		# иногда ss запущен, но упал и ничего не слушает
+		netstat -tulpn 2>/dev/null | grep -F ":$(get_config_value SSR_DNS_PORT) " | grep -qF -- 'ss-redir'
+	else
+		keenetic_name=$(curl -s "${INFACE_REQUEST}/${keenetic_name}" \
+		  | jq -r 'select(.state=="up" and .link=="up" and .connected=="yes") | .id // empty')
+		[ -n "${keenetic_name}" ]
+	fi
+}
+
+clean_escape(){
+#---------------------------------------------------------------------------------
+#   Очистка строки от управляющих символов
+#   $1 - срока для очистки
+#---------------------------------------------------------------------------------
+ # Очистка строки от управляющих символов
+ printf "%s" "${1}" | sed 's/\x1B\[[0-9;]*[a-zA-Z]//g'
+}
+
+#
+# Делаем копию файла
+#
+backup_copy(){
+	source_file=${1}
+	backup_file=${2}
+	[ -f "${source_file}" ] && cp -f "${source_file}" "${backup_file}"
+}
+
+
+get_firmware_version(){
+#	номер версии фирменной Keenetic ОС
+	curl -s localhost:79/rci/show/version | jq '.title' | sed 's/["a-zA-Z]//g'
+}
+
+get_hook_dir(){
+#	Получаем директорию текущего механизма обработки состояний подключений
+	get_firmware_version | grep -q '4.' && echo "iflayerchanged.d" ||  echo "ifstatechanged.d"
+}
+
+is_os_below_4_2() {
+	if [ -n "${1}" ]; then
+		local os_version="${1}"
+	else
+		local os_version="$(version_os)"
+	fi
+
+	local os_subversion=$(echo "${os_version}" | cut -d '.' -f 1)
+	if [ "${os_subversion}" -lt 4 ]; then
+		return
+	fi
+
+	if [ "${os_subversion}" -eq 4 ]; then
+		os_subversion=$(echo "${os_version}" | cut -d '.' -f 2)
+		if [ "${os_subversion}" -lt 2 ]; then
+			return
+		fi
+	fi
+
+	false
+}
+
+is_ip_private() {
+	if echo "$1" | grep -qE '^(255\.|224\.|0\.|127\.|192\.168\.|10\.|172\.1[6789]\.|172\.2[0-9]\.|172\.3[01]\.)'; then
+		return
+	fi
+
+	false
+}
+
+get_external_interface() {
+	local interface=$( ip route | grep -F 'default' | head -n 1 | grep -oE -- 'dev +[a-zA-Z0-9\+\.\-]+' | cut -d' ' -f2 )
+	if [ -n "${interface}" ] ; then
+		echo "${interface}"
+		return
+	fi
+
+	log_error 'Внешний сетевой интерфейс найти не удалось'
+	false
+}
+
+get_entware_ikev2_inface() {
+	if ! is_os_below_4_2 ; then
+		# на последних прошивках IKEv2 на этом интерфейсе
+		echo 'xfrms+'
+		return
+	fi
+
+	local external_interface="$(get_external_interface)"
+	if [ -n "${external_interface}" ]; then
+		echo "${external_interface}"
+		return
+	fi
+
+	log_error 'Сетевой интерфейс для IKEv2 найти не удалось'
+	# чтобы остальной код продолжал работать, вернём точно имеющийся интерфейс
+	echo 'br0'
+}
+
+get_from_json() {
+	if [ -z "${1}" ] ; then
+		error "[${FUNCNAME}] Не задан обязательный аргумент — файл"
+		return
+	fi
+	if ! [ -f "${1}" ] ; then
+		error "[${FUNCNAME}] Указанный файл не найден"
+		return
+	fi
+	file="${1}"
+
+	if [ -z "${2}" ] ; then
+		error "[${FUNCNAME}] Не задан обязательный аргумент — ключ"
+		return
+	fi
+	key="${2}"
+
+	# если задана секция
+	if [ -n "${3}" ] ; then
+		local file_content=$(jq -c ".${3}" "${file}")
+	else
+		local file_content=$(cat < "${file}")
+	fi
+
+	echo "${file_content}" | grep -oE "${key}"'"?: *"?[^" ,]++' | head -1 | tr -d '" ,' | cut -d':' -f2
+}
+
+get_ip_list(){
+#	{1} - исследуемый домен
+#	{2} - DNS сервер для опроса
+    get_iplist_from_domain "${1}" "${2}" | grep -E '[0-9.]' | grep '^'"${1}" | sed -n 's/^.*A.*\([0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\)/\1/p'
+}
+
+#
+# 	Проверка хоста на то, доступен ли он через туннель или через провайдера
+#	ВНИМАНИЕ! Доступна не для всех доменов
+#
+is_inside_tunnel(){
+	host_to_check=${1}
+	tunnel_dns=${2}
+	provider_dns=${3:-9.9.9.9}
+
+	[ -z "${tunnel_dns}" ] && tunnel_dns=$(get_router_ip)
+	grep_cmd=""
+
+	for _ip in $(get_ip_list "${host_to_check}" "${provider_dns}")
+	do
+			grep_cmd=${grep_cmd}" | grep ${_ip}"
+	done
+	tunn_ip_list=$(get_ip_list "${host_to_check}" "${tunnel_dns}" | tr '\n' ' ')
+	grep_cmd=$(echo "echo ${tunn_ip_list} ${grep_cmd}" | sed 's/\(.*grep \)\([0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\)$/\1 -q \2/' | tr -s ' ')
+
+	eval "! ${grep_cmd}"
+}
+
+NETS_COMMON=''
+nets__set_common() {
+	if [ -n "${NETS_COMMON}" ]; then
+		return
+	fi
+
+	local api_info net_info
+	api_info=$(curl -s '127.0.0.1:79/rci/show/interface' \
+	  | jq -r 'values[] | select(.address!=null) | "\(.address)|\(.id)|\"\(.description)\"" // empty')
+	net_info=$(/opt/sbin/ip -f inet addr | grep -F 'inet' | grep -vF '127.0.0.1' | grep -vF '78.47.125.180' \
+	  | sed -n 's/.*inet \([0-9\.]\+\).* scope global \([^ ]\+\)/\2|\1/p')
+
+	local line finded
+	IFS=$'\n'
+	for line in $net_info; do
+		finded=$(echo "${line}" | cut -d'|' -f2)
+		finded=$(echo "${api_info}" | grep "^${finded}" | head -n 1 | cut -d'|' -f2-3)
+		if [ -n "${finded}" ]; then
+			NETS_COMMON="${NETS_COMMON}${line}|${finded}"$'\n'
+			continue
+		fi
+
+		#ToDo: если начало tun, то добавлять '|TUN|"TUN интерфейс"'
+		# Остальные части пакета научить жить с TUN
+
+		# Так выглядят отключенные. Стоит ли логировать?
+		log_warning "Сеть ${line} не найдена в API"
+	done
+
+	log_warning 'Сбор общих сетей завершён'
+	# чтобы не сканировало повторно, если ничего не найдено
+	if [ -z "${NETS_COMMON}" ]; then
+		NETS_COMMON=$'\n'
+	fi
+}
+
+NETS_TUNNEL='ezcfg0|78.47.125.180|shadowsocks|"ShadowSocks"'$'\n'
+
+# замена Singleton, чтобы скан был лишь при первом вызове
+NETS_INCOMING=''
+nets__set_incoming() {
+	if [ -n "${NETS_INCOMING}" ]; then
+		return
+	fi
+	local api_tags api_info
+	# Запрос конкретного раздела может оставить ошибки в логе роутера, если он отключен.
+	# Поэтому проверять включенность будем через тэги.
+	api_tags=$(curl -s '127.0.0.1:79/rci/show/tags/')
+
+	# IPsec в crypto
+	if echo "${api_tags}" | grep -qF 'ipsec-xauth' ; then
+		api_info=$(curl -s '127.0.0.1:79/rci/crypto/virtual-ip-server-ikev2')
+		if [ -n "${api_info}" ] ; then
+			NETS_INCOMING="${NETS_INCOMING}"'xfrms+|'$(echo "${api_info}" \
+			  | jq -r '."pool-start" // empty')'|crypto/virtual-ip-server-ikev2|"VPN-сервер IKEv2/IPsec"'$'\n'
+		fi
+	fi
+	if echo "${api_tags}" | grep -qF 'ipsec-l2tp' ; then
+		api_info=$(curl -s '127.0.0.1:79/rci/crypto/l2tp-server')
+		if [ -n "${api_info}" ] ; then
+			NETS_INCOMING="${NETS_INCOMING}"'l2tp+|'$(echo "${api_info}" \
+			  | jq -r '."pool-start" // empty')'|crypto/l2tp-server|"VPN-сервер L2TP/IPsec"'$'\n'
+		fi
+	fi
+
+	# остальные в глобальном
+	if echo "${api_tags}" | grep -qF 'vpn-oc' ; then
+		api_info=$(curl -s '127.0.0.1:79/rci/oc-server')
+		if [ -n "${api_info}" ] ; then
+			NETS_INCOMING="${NETS_INCOMING}"'oc+|'$(echo "${api_info}" \
+			  | jq -r '.config."pool-start" // empty')'|oc-server|"VPN-сервер OpenConnect"'$'\n'
+		fi
+	fi
+	if echo "${api_tags}" | grep -qF 'sstp' ; then
+		api_info=$(curl -s '127.0.0.1:79/rci/sstp-server')
+		if [ -n "${api_info}" ] ; then
+			NETS_INCOMING="${NETS_INCOMING}"'sstp+|'$(echo "${api_info}" \
+			  | jq -r '.config."pool-start" // empty')'|sstp-server|"VPN-сервер SSTP"'$'\n'
+		fi
+	fi
+
+	log_warning 'Сбор входящих сетей завершён'
+	# чтобы не сканировало повторно, если ничего не найдено
+	if [ -z "${NETS_INCOMING}" ]; then
+		NETS_INCOMING=$'\n'
+	fi
+}
+
+nets__get_param_by_fields() {
+	if [ -z "${1}" ] ; then
+		echo '\1|\2|\3|\4'
+		return
+	fi
+	local fields_name="${1}"
+
+	local field_name field_num
+	local params=''
+	IFS=' '
+	for field_name in $fields_name; do
+		case "${field_name}" in
+			net | linux)         field_num=1 ;;
+			ip)                  field_num=2 ;;
+			api | keenetic)      field_num=3 ;;
+			title | description) field_num=4 ;;
+			*)
+				error "[${FUNCNAME}] Передано неизвестное имя поля ${field_name}"
+				return
+			;;
+		esac
+
+		params="${params}\\${field_num}|"
+	done
+	echo "${params:0:-1}"
+}
+
+nets__get() {
+	# для работы в отдельном контексте передаём его, а не берём из глобальной
+	if [ -z "${1}" ] ; then
+		error "[${FUNCNAME}] Не передан обязательный параметр — список сетей"
+		return
+	fi
+	local nets_dictionary="${1}"
+
+	if [ -z "${2}" ] ; then
+		error "[${FUNCNAME}] Не передан обязательный аргумент, по которому ищется сетевой интерфейс"
+		return
+	fi
+	local find_string="${2}"
+
+	local find_interface
+
+	find_interface=$(echo "${nets_dictionary}" | grep -F "${find_string}" | head -n 1)
+	if [ -z "${find_interface}" ]; then
+		return
+	fi
+
+	if [ -z "${3}" ] ; then
+		echo "${find_interface}"
+		return
+	fi
+
+	local param_replace="${3}"
+	param_replace=$(nets__get_param_by_fields "${param_replace}")
+	if [ -z "${param_replace}" ] ; then
+		return
+	fi
+
+	local param_field='\([^|]*\)'
+	echo "${find_interface}" | sed -n "s/${param_field}|${param_field}|${param_field}|${param_field}/${param_replace}/p"
+}
+
+#ToDo: перейти везде на новые обёртки
+has_ssr_enable() {
+	is_shadowsocks_enabled
+}
+
+is_shadowsocks_enabled() {
+	local tunnel_keenetic_name
+	tunnel_keenetic_name=$(get_config_value 'INFACE_CLI')
+	[ "${tunnel_keenetic_name}" = 'shadowsocks' ]
+}
+
+is_vless_over_proxy_enabled() {
+	local tunnel_keenetic_name
+	tunnel_keenetic_name=$(get_config_value 'INFACE_CLI')
+	if [ -z "${tunnel_keenetic_name}" ] ; then
+		error "[${FUNCNAME}] В конфигурации Пивас не найдена информация о тоннеле"
+		false
+		return
+	fi
+
+	[ "${tunnel_keenetic_name}" = "${PROXY_VLESS_NAME}" ]
+}
+
+
+has_adguard_enable() {
+	if [ -f "${ADGUARDHOME_DEMON}" ]; then  
+		"${ADGUARDHOME_DEMON}" status | grep -q alive
+	else
+		return 1
+	fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Переподключаем основной интерфейс в случае обрыва
+#
+# ------------------------------------------------------------------------------------------
+reset_ISP_connection() {
+	# получаем текущее состояние инф-са для возвращения его к исходному состоянию
+	id=$(get_defaultgw_id)
+	curl -s -d '{"down":"true"}' "${INFACE_PART_REQUEST}/${id}" &> /dev/null
+	sleep 3
+	curl -s -d '{"up":"true"}' "${INFACE_PART_REQUEST}/${id}" &> /dev/null
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем список гостевых интерфейсов из файла конфигурации
+#
+# ------------------------------------------------------------------------------------------
+get_guest_inface_list_from_config(){
+	get_config_value INFACE_GUEST_ENT | tr ',' ' '
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Перегружаем заданное соединение inface_cli
+#
+# ------------------------------------------------------------------------------------------
+reset_connection() {
+	inface_cli=${1}
+	time_delay=${2}
+	# получаем текущее состояние инф-са для возвращения его к исходному состоянию
+	state=$(curl -s "${INFACE_REQUEST}" | jq -r '.[] | select(.id=="'"${inface_cli}"'") | .state')
+	isp_state=$(curl -s "${INFACE_REQUEST}" | jq -r '.[] | select(.defaultgw==true and .global==true) | .state')
+	if echo "${isp_state}" | grep -q down ; then
+		reset_ISP_connection || {
+			error "Проверьте соединение с провайдером и/или настройки DNS."
+			return 1
+		}
+	fi
+
+
+	# в зависимости от состояния - включаем и выключаем или выключаем и включаем интерфейс
+	# для того, чтобы сработал наш хук в файле /opt/etc/ndm/ifstatechanged.d/100-save-inface_entware
+	if [ "${state}" = 'up' ]; then
+		curl -s -d '{"down":"true"}' "${INFACE_PART_REQUEST}/${inface_cli}" &> /dev/null
+	else
+		error_mess=$(curl -s -d '{"up":"true"}' "${INFACE_PART_REQUEST}/${inface_cli}" \
+		 |  jq '.[] | .status | .[] | select(.status == "error") | .message' | tr '\"' '"')
+		echo "${error_mess}" | grep -q '[a-zA-Z]' && {
+			error "Обнаружена ошибка при переключении '${inface_cli}' сети. " nl
+			error "Прежде чем продолжить - устраните ее." nl
+			print_line
+			error "${error_mess}" nl
+			print_line
+			return 1
+		}
+	fi
+	sleep "${time_delay}"
+	curl -s -d "{\"${state}\":\"true\"}" "${INFACE_PART_REQUEST}/${inface_cli}" &> /dev/null
+	sleep 1 && return 0
+}
+
+
+pause()(read -r pause &> /dev/null)
+
+# ------------------------------------------------------------------------------------------
+#
+# 		Получаем значение переменной из файла конфигурации
+# 		/opt/apps/pivas/etc/conf/pivas.conf
+#
+# 		$1 - имя переменной
+#
+# ------------------------------------------------------------------------------------------
+get_config_value() {
+	if [ -z "${1}" ] ; then
+		error "[${FUNCNAME}] Не задан обязательный аргумент — ключ конфигурации"
+		return
+	fi
+	local key="${1}"
+
+	if ! [ -f "${PIVAS_CONF_FILE}" ] ; then
+		error "[${FUNCNAME}] Файл конфигурации ${PIVAS_CONF_FILE} не найден"
+		return
+	fi
+
+	grep -- "^${key}=" "${PIVAS_CONF_FILE}" | head -n 1 | cut -d'=' -f2
+}
+
+APP_VERSION=$(get_config_value APP_VERSION)
+APP_RELEASE=$(get_config_value APP_RELEASE)
+
+version(){
+	[ -n "${APP_RELEASE}" ] && APP_RELEASE=" ${APP_RELEASE}"
+	APP_VERSION=$(echo "${APP_VERSION}" | tr '-' ' ')
+	warning "Версия пакета ${APP_VERSION}${APP_RELEASE}"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+# 		Получаем значение переменной из файла конфигурации
+# 		/opt/apps/pivas/etc/conf/pivas.conf
+#
+# 		$1 - имя переменной
+# 		$2 - значение переменной
+#
+# ------------------------------------------------------------------------------------------
+set_config_value() {
+	if grep -oq "${1}" "${PIVAS_CONF_FILE}"; then
+		sed -i "s/\(${1}=\).*/\1${2}/; s/^,//; s/\,/ /g;" "${PIVAS_CONF_FILE}"
+	else
+		echo "${1}=${2}" >> "${PIVAS_CONF_FILE}"
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+# 		Удаляем значение переменной из файла конфигурации
+# 		/opt/apps/pivas/etc/conf/pivas.conf
+#
+# 		$1 - имя переменной
+#
+# ------------------------------------------------------------------------------------------
+del_config_value() {
+	sed -i "/${1}/d" "${PIVAS_CONF_FILE}"
+}
+# ------------------------------------------------------------------------------------------
+#
+# 		Прогресс-бар
+# 		Источник:
+# 		https://stackoverflow.com/questions/238073/how-to-add-a-progress-bar-to-a-shell-script
+#
+# ------------------------------------------------------------------------------------------
+
+progress_bar() {
+  # Аргументы: текущее значение, максимальное значение, единица измерения (необязательно)
+  value=${1}
+  max=${2}
+  unit=${3:-""}  # если блок не указан, не отображаем его
+  [ -n "${unit}" ] && unit=" ${unit}"
+  # Calculate percentage
+  if [ "${max}" -lt 1 ]; then max=1; fi  # защита от деления на ноль
+  percentage=$(( 100 - (max*100 - value*100) / max))
+
+  # Меняем масштаб полосы в соответствии с шириной индикатора выполнения.
+  num_bar=$(( percentage * PROGRESS_BAR_WIDTH / 100 ))
+
+  # Рисуем прогресс-бар
+  printf "[ ${GREEN}"
+  for b in $(seq 1 ${num_bar}); do printf "#"; done
+  for s in $(seq 1 $(( PROGRESS_BAR_WIDTH - num_bar ))); do printf " "; done
+  printf "${NOCL} ] ${percentage}%% (${value}/${max}${unit})\r"
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Форматирует разряды числа, разделяя их пробелом: 122 543 567
+#
+# ------------------------------------------------------------------------------------------
+
+dig_frm() {
+	echo "${1}" | sed ':a;s/\([^0-9.][0-9]\+\|^[0-9]\+\)\([0-9]\{3\}\)/\1\ \2/g;ta'
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем внешний IP роутера через который он выходит в сеть в текущий момент
+#
+# ------------------------------------------------------------------------------------------
+
+get_external_ip() {
+	dns=$(get_config_value DNS_STATIC_1)
+	/opt/sbin/ip route get ${dns} | sed -E 's/.*src (\S+) .*/\1/;t;d'
+}
+
+vpn__get_tunnel_addresses() {
+	if [ -z "${1}" ] ; then
+		error "[${FUNCNAME}] Не задан обязательный аргумент — название соединения"
+		return
+	fi
+	local api_interface="${1}"
+
+	local api_response=$(curl -s "${INFACE_PART_REQUEST}/${api_interface}")
+	if [ -z "${api_response}" ] ; then
+		error "[${FUNCNAME}] Не найдено соединение ${api_interface}"
+		return
+	fi
+
+	local address
+
+	# формат L2TP
+	address=$(echo "${api_response}" | jq -r '.peer // empty')
+	if [ -n "${address}" ]; then
+		log_warning "Адрес подключения L2TP ${address}"
+		echo "${address}"
+		return
+	fi
+
+	# формат IKEv2
+	address=$(echo "${api_response}" | jq -r '.tunnel.destination // empty')
+	if [ -n "${address}" ]; then
+		log_warning "Адрес подключения IKEv2 ${address}"
+		echo "${address}"
+		return
+	fi
+
+	local addresses
+
+	# формат Wireguard
+	addresses=''
+	for address in $(echo "${api_response}" | jq -r '.wireguard.peer[]? .endpoint.address // empty') ; do
+		if [ -z "${address}" ]; then
+			continue
+		fi
+
+		addresses="${addresses}$(echo "${address}" | cut -d':' -f1)"$'\n'
+	done
+	if [ -n "${addresses}" ]; then
+		log_warning "Адреса подключения Wireguard $(echo "${addresses}" | xargs)"
+		echo "${addresses}"
+		return
+	fi
+
+	# универсальный код по поиску внешнего IP вне allow-ips
+	#ToDo: проверить на всех типах VPN! Для каждого добавить json-блок выше и исключение сюда мусорных массивов.
+	addresses=''
+	for address in $(echo "${api_response}" | sed '/allow-ips/,/]/d' | grep -oE "${IP_FILTER}") ; do
+		if [ -z "${address}" ] ; then
+			continue
+		fi
+		if is_ip_private "${address}" ; then
+			continue
+		fi
+		# часто встречается, не является тоннелем
+		if [ "${address}" = '8.8.8.8' ] ; then
+			continue
+		fi
+
+		addresses="${addresses}${address}"$'\n'
+	done
+	if [ -n "${addresses}" ]; then
+		log_warning "IP неизвестного VPN-подключения $(echo "${addresses}" | xargs)"
+		echo "${addresses}"
+		return
+	fi
+
+	log_error 'IP сервера VPN найти не удалось'
+	echo ''
+}
+
+get_tunnel_addresses() {
+	if is_shadowsocks_enabled ; then
+		echo $(get_from_json "${SHADOWSOCKS_CONF}" 'server')
+	elif is_vless_over_proxy_enabled ; then
+		echo $(get_from_json "${VLESS_CONFIG_FILE}" 'address' 'outbounds')
+	else
+		echo $(vpn__get_tunnel_addresses "$(get_config_value INFACE_CLI)")
+	fi
+}
+
+get_tunnel_ip() {
+	local ips
+	IFS=$'\n'
+	for address in $( get_tunnel_addresses ) ; do
+		if [ -z "${address}" ] ; then
+			continue
+		fi
+
+		if echo "${address}" | grep -qE "^${IP_FILTER}$" ; then
+			echo "${address}"
+			continue
+		fi
+
+		ips=''
+		IFS=$'\n'
+		for tunnel_ip in $( dns__get_ips_by_domain "${address}" ) ; do
+			if [ -z "${tunnel_ip}" ] ; then
+				continue
+			fi
+			echo "${tunnel_ip}"
+
+			ips="${ips} ${tunnel_ip}"
+		done
+		log_warning "IP для домена ${address}: ${ips}"
+	done
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем локальный IP роутера
+#
+# ------------------------------------------------------------------------------------------
+get_router_ip() {
+	/opt/sbin/ip a | grep ": $(get_local_inface):" -A4 | grep 'inet ' | tr -s ' ' | cut -d' ' -f3 | cut -d'/' -f1
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем ID интерфейса (entware) на заданном IP адресе
+#	$1 - заданный IP адрес
+#
+# ------------------------------------------------------------------------------------------
+get_inface_by_ip() {
+	local_ip="${1}"
+	/opt/sbin/ip a | grep global | grep "inet ${local_ip}/" | sed 's/^.* \(.*\)$/\1/'
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем IP интерфейса по заданному entware интерфейсу
+#	$1 - заданный entware интерфейс
+#
+# ------------------------------------------------------------------------------------------
+get_ip_by_inface() {
+	if [ -z "${1}" ] ; then
+		error "[${FUNCNAME}] Не задан обязательный аргумент — сетевой интерфейс"
+		return
+	fi
+	local net_interface="${1}"
+
+	/opt/sbin/ip a | grep -F "${net_interface}" | grep -F 'global' | grep -oE "inet ${IP_FILTER}" | cut -d' ' -f2
+}
+
+get_net_by_ip() {
+	if [ -z "${1}" ] ; then
+		error "[${FUNCNAME}] Не задан обязательный аргумент — IP"
+		return
+	fi
+	local ipa="${1}"
+
+	if ! echo "${ipa}" | grep -qE "^${IP_FILTER}$" ; then
+		error "[${FUNCNAME}] Переданный аргумент — не IP"
+		return
+	fi
+
+	echo "$(echo ${ipa} | cut -d'.' -f1-3).0/24"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем ID локального интерфейса
+#
+# ------------------------------------------------------------------------------------------
+get_local_inface() {
+    local lan
+    lan=$(get_config_value LAN_INTERFACE)
+    case "$lan" in ''|*[!a-zA-Z0-9_.:-]*) echo br0 ;; *) echo "$lan" ;; esac
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем протокол работы WUI роутера:
+#	Возвращает HTTP:// или HTTPS://
+#
+# ------------------------------------------------------------------------------------------
+get_router_protocol() {
+	ssl=$(curl -s "localhost:79/rci/ip/http/security-level" | grep ssl | sed 's/.ssl.://' | tr -d " ")
+	[ "${ssl}" = "true" ] && protocol='https://' || protocol='http://'
+	echo ${protocol}
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем локальный порт WUI роутера
+#
+# ------------------------------------------------------------------------------------------
+get_router_wui_port() {
+	curl -s "localhost:79/rci/ip/http/port" | tr -d '" ' | sed 's/[{}]//g'
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Получаем локальный host роутера с задействован=ным протоколом и портом
+#
+# ------------------------------------------------------------------------------------------
+get_router_host() {
+	port=$(get_router_wui_port)
+	ip=$(get_router_ip)
+	protocol=$(get_router_protocol)
+	[ -z "${port}" ] && ip="${ip}" || {
+		[ "${port}" -eq 80 ] || ip="${ip}:${port}"
+	}
+#	echo "${protocol}${ip}"
+	echo "http://${ip}"
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Печать текста с выравниванием по левому краю
+# 	$1 - текст
+#
+# ------------------------------------------------------------------------------------------
+left() {
+  text=$(printf "%-${LENGTH}s" "${1}")
+  echo -e "${text}"
+}
+# ------------------------------------------------------------------------------------------
+#
+#	Печать текста с выравниванием по центру
+# 	$1 - текст
+#
+# ------------------------------------------------------------------------------------------
+center() {
+	diff=$((LENGTH-${#1}))
+  	right=$((diff/2))
+  	left=$((diff - right))
+  	text=$(printf "%*s%s%*s\n" "${left}" "" "${1}" "${right}" "")
+  	echo -e "${text}"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Вспомогательная функция печати в лог отладки
+#
+# ------------------------------------------------------------------------------------------
+echo_debug() {
+	if [ -n "${2}" ]; then
+		print_line; echo -e "${1}"; print_line
+		echo -e "${2}"; printf "\n"
+	fi
+}
+diff_len() {
+	len=${2:-${LENGTH}}			# максим длинна строки
+	charlen=$(echo "${1}" | sed -r "s/[\]033\[([0-9]{1,3}(;[0-9]{1,2})?)?[mGK]//g")
+	charlen=${#charlen}
+	echo $(( len - charlen ))
+}
+
+join_ready() {
+        size=$(diff_len "${1}" "${3}")
+        printf "%b%-${size}s%b" "${1}"
+        printf "%b%s%b" "${4}${2}${NOCL}"
+}
+ready() {
+	size=$(diff_len "${1}")
+	printf "%b%-${size}s%b" "${1}"
+}
+ready_red() {
+	error="${RED}${1}${NOCL}"
+	size=$(diff_len "${error}")
+	printf "%b%-${size}s%b" "${error}"
+}
+error() {
+#	[ -z "${2}" ] && nn='\n' || nn=''
+	_error="${RED}${1}${NOCL}"
+	size=$(diff_len "${_error}")
+#	printf "${nn}%b%-${size}s%b\n" "${_error}" 2>&1
+	printf "%b%-${size}s%b\n" "${_error}" 2>&1
+	log_error "${1}"
+}
+warning() {
+	_error="${GREEN}${1}${NOCL}"
+	size=$(diff_len "${_error}")
+	printf "%b%-${size}s%b\n" "${_error}"
+}
+#--------------------------------------------------------------------------------------------------------------
+when_ok() {
+#	Функция работает в купе с ready и применяется следующим образом для примера:
+#	ready 'Запускаем в работу...' {исполняемый код} && when_ok || when_err
+#	печатает слово ГОТОВО зеленым цветом на одной строке с выводимым ready сообщением
+# 	в случае, когда исполняемый код успешно выполнен
+	ok_text=${1:-ГОТОВО}
+	num_left=$((${#ok_text} + 2))
+	to_left="\033[${num_left}D"
+	echo -e " ${GREEN}${to_left}${ok_text}${NOCL}"
+}
+
+#--------------------------------------------------------------------------------------------------------------
+when_bad() {
+#	Функция работает в купе с ready и применяется следующим образом для примера:
+#	ready 'Запускаем в работу...' {исполняемый код} && when_ok || when_err
+#	печатает слово ОШИБКА красным цветом на одной строке с выводимым ready сообщением
+# 	в случае, когда исполняемый код выполнен с ошибкой
+	err_text=${1:-ОШИБКА}
+	num_left=$((${#err_text} + 1))
+	to_left="\033[${num_left}D"
+	echo -e "${RED}${to_left}${err_text}${NOCL}"
+}
+
+when_alert() {
+	alert_text=${1}
+	num_left=$((${#alert_text} + 1))
+	to_left="\033[${num_left}D"
+	echo -e "${BLUE}${to_left}${alert_text}${NOCL}"
+}
+#функция перчатает заданное число раз один и тот же символ
+print_line() {
+	len=$((LENGTH))
+	printf "%${len}s\n" | tr " " "-"
+}
+please_repeat() {
+  echo -e "Пожалуйста ответьте на вопрос ${GREEN}'Y' - да${NOCL} или ${RED}'N' - нет${NOCL}, ${BLUE}Q - выход${NOCL}"
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Вспомогательная функция очистки содержимого
+#	 файлов от мусора при этом файл не заменяется
+#
+# ------------------------------------------------------------------------------------------
+clear_file() {
+	cat < "${1}" \
+	  | sed 's/\(^.*\)#.*$/\1/g' \
+	  | grep -v '#' \
+	  | sed 's/[[:blank:]]//g;s/^\([a-zA-Z]\+\:\)\?\/\///g;s/^\*//g;s/^\.//g;s/\/$//g;s/\/[^0-9].*\+$//g;s/\/[0-9][^0-9].*\+$//g;s/\/[0-9][0-9].\+\+$//g;/^$/d'
+}
+# ------------------------------------------------------------------------------------------
+#	Очищаем содержимое файла сортируем и убираем дубликаты
+#	и в случае наличия второго аргумента
+#	отбираем строки которые начинаются на аргумент
+#	при этом файл-источник не заменяется
+# ------------------------------------------------------------------------------------------
+clear_content() {
+	if [ -f "${1}" ] && [ -n "${2:-}" ]; then
+		clear_file "${1}" | sort -u | grep "^${2}"
+	else
+	  clear_file "${1}" | sort -u
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#	Очищаем содержимое файла сортируем и убираем дубликаты
+#	и записываем в тот же файл источник - меняем источник
+# ------------------------------------------------------------------------------------------
+clear_file_content() {
+	local content
+	content=$(clear_content "${1}")
+	echo "${content}" > "${1}"
+}
+# ------------------------------------------------------------------------------------------
+#	Считаем число строк в файле
+#	и при заданном втором аргументе считаем только
+#	строки которые содержат этот аргумент
+# ------------------------------------------------------------------------------------------
+rec_in_file() {
+  if [ "${2}" ]; then
+	  clear_content "${1}" | grep -c "^${2}"
+	else
+	  clear_content "${1}" | wc -l
+	fi
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Читаем Y/N/Q из ввода данных в цикле
+# 	 $1 - заголовок для запроса
+# 	 $2 - переменная в которой возвращается результат
+#
+# ------------------------------------------------------------------------------------------
+read_ynq() {
+	header="$(echo "${1}" | tr -d '?')"; quest="[Y/N,Q]?"
+#	в случае, если встретиться слово с корнем "удал", то цвет заголовка - красный
+	if echo "${header}" | grep -qiE "удал"; then
+		header="${RED}${header} ${quest}${NOCL}";
+	else
+		if echo "${header}" | grep -qiE "[Y]"; then
+			header="${BLUE}${header}${NOCL}";
+		else
+			header="${BLUE}${header} ${quest}${NOCL}";
+		fi
+	fi
+	while true; do
+		echo -en "${QST} ${header}  "
+		read -r ynq
+		case "${ynq}" in
+			[Yy]* ) eval "${2}=y"; break; ;;
+			[NnQq]* ) eval "${2}=n"; break; ;;
+			     *) please_repeat ;;
+		esac
+	done
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Читаем Y/N/Q из ввода данных в цикле
+# 	 $1 - заголовок для запроса
+# 	 $2 - переменная в которой возвращается результат
+#	 $3 - номер пункта при окончании времени ожидания (y - по умолчанию)
+# 	 $4 - время ожидания (3 сек - по умолчанию)
+#
+# ------------------------------------------------------------------------------------------
+read_ynq_timer() {
+	header="$(echo "${1}" | tr -d '?')"; quest="[Y/N,Q]?"
+	default=${3:-y}; timeout=${4:-3};
+#	в случае, если встретиться слово с корнем "удал", то цвет заголовка - красный
+	if echo "${header}" | grep -qiE "удал"; then
+		header="${RED}${header} ${quest}${NOCL}";
+	else
+		if echo "${header}" | grep -qiE "[Y]"; then
+			header="${BLUE}${header}${NOCL}";
+		else
+			header="${BLUE}${header} ${quest}${NOCL}";
+		fi
+	fi
+	while true; do
+		echo -en "${QST} ${header}  "
+		read -t ${timeout} -r ynq
+		[ $? = 1 ] && {
+			ynq="${default}"
+			echo -n "${default}"; echo
+		}
+		case "${ynq}" in
+			[YyNnQq]* ) eval "${2}=${ynq}"; break; ;;
+				 *) echo -e "Пожалуйста ответьте на вопрос 'Y' - да или 'N' - нет, Q - выход"
+			;;
+		esac
+	done
+}
+
+exit_q(){
+	print_line
+	error "Процедура прервана пользователем!"
+}
+clean(){
+	printf "%b%s%b" "\033c"
+}
+
+
+# ------------------------------------------------------------------------------------------
+#
+#	 Читаем значение переменной из ввода данных в цикле
+#	 $1 - заголовок для запроса
+#	 $2 - переменная в которой возвращается результат
+#	 $3 - тип вводимого значения
+#		 digit - цифра
+#		 password - пароль без показа вводимых символов
+#
+# ------------------------------------------------------------------------------------------
+read_value() {
+	header="$(echo "${1}" | tr -d '?')"
+	type="${3}"
+
+	while true; do
+		echo -en "${BLUE}${header}${NOCL} [Q-выход]  "
+		if [ "${type}" = 'password' ]; then read -rs value; else read -r value; fi
+		if [ -z "${value}" ]; then
+				echo
+				print_line
+				echo -e "${RED}Данные не должны быть пустыми!"
+				echo -e "${GREEN}Попробуйте ввести значение снова...${NOCL}"
+				print_line
+		elif echo "${value}" | grep -qiE '^Q$' ; then
+				eval "${2}=q"
+				break
+		elif [ "${type}" = 'digit' ] && ! echo "${value}" | grep -qE '^[[:digit:]]{1,6}$'; then
+				echo
+				print_line
+				echo -e "${RED}Введенные данные должны быть цифрами!"
+				echo -e "${GREEN}Попробуйте ввести значение снова...${NOCL}"
+				print_line
+		elif [ "${type}" = 'password' ] && ! echo "${value}" | grep -qE '^[a-zA-Z0-9]{8,1024}$' ; then
+				echo
+				print_line
+				echo -e "${GREEN}Пароль должен содержать минимум 8 знаков и"
+				echo -e "${GREEN}ТОЛЬКО буквы и ЦИФРЫ, ${RED}без каких-либо спец символов!${NOCL}"
+				echo -e "${RED}Попробуйте ввести его снова...${NOCL}"
+				print_line
+		else
+				eval "${2}=\"${value}\""
+				break
+		fi
+	done
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Получаем  системное время с удаленного сервера
+#	 $1 - адрес удаленного сервера
+#
+# ------------------------------------------------------------------------------------------
+get_server_date() {
+	curl --insecure --silent --max-time 5 --head "https://${1}/" \
+				| grep -i ^Date: \
+				| cut -d' ' -f2-
+}
+# ------------------------------------------------------------------------------------------
+#
+#	 Обновляем системное время
+#
+# ------------------------------------------------------------------------------------------
+date_update() {
+	convert_format='%a, %d %b %Y %H:%M:%S'
+	show_format="+%H:%M:%S"
+	ip=$(get_config_value DNS_STATIC_1)
+	date -u -D "${convert_format}" -s "$(get_server_date "${ip}")" &>/dev/null
+	if [ $? != 0 ]; then
+		ip=$(get_config_value DNS_STATIC_2)
+		date -u -D "${convert_format}" -s "$(get_server_date "${ip}")" &>/dev/null
+		if [ $? = 0 ]; then
+			echo "Системное время обновлено с резервного сервера:"
+			when_alert "$(date "${show_format}")"
+		fi
+	else
+		ready "Системное время обновлено с основного сервера:"
+		when_alert "$(date "${show_format}")"
+	fi
+}
+
+print_error(){
+	error_desc="${1}"
+	err_signal="ОШИБКА::"
+	error_mess="$(cat < "${ERROR_LOG_FILE}")"
+#           Вывод сообщения в консоль
+	[ -n "${error_mess}" ] && {
+		error "\n${err_signal} ${error_desc}"; print_line
+		warning "${error_mess}"; print_line
+
+#           Вывод сообщения в лог роутера
+#		while read -r line || [ -n "${line}" ]; do
+#			[ -z "${line}" ] && continue
+#			logger -p err -t "${APP_NAME_DESC}" "${err_signal}${line}"
+#		done < "${ERROR_LOG_FILE}"
+	}
+
+
+}
+# ------------------------------------------------------------------------------------------
+#
+# 	Применяем только с функцией ready !!!
+#	Печатаем сообщение об ошибке, если она случается и печатаем результат команды ready,
+#	если все хорошо. Для той команды после которой вызывается
+#	эта функция необходимо произвести вывод данных по раздельным каналам
+#	в stdin и stderr: <команда> 1> /dev/null 2> "${ERROR_LOG_FILE}"
+#
+#	$1 - результат выполнения функции -> передаем сюда "${?}"
+# 	$2 - сообщение которое отображает суть ошибки (описание ошибки)
+#	$3 - сообщение статуса исполнения при положительном результате
+#
+# ------------------------------------------------------------------------------------------
+ready_status(){
+
+        operation_result="${1}"
+        error_desc="${2}"
+        ok_mess="${3:-ГОТОВО}"
+        errors_only="${4:-1}"
+
+		[ -f "${ERROR_LOG_FILE}" ] || touch "${ERROR_LOG_FILE}"
+#		Печатаем ошибку, только, если ошибка была и файл с ошибками не пустой
+        if [ "${operation_result}" = 1 ] || [ "$(cat < "${ERROR_LOG_FILE}" | wc -l)" -gt 0 ] ; then
+			print_error "${error_desc}"
+        else
+        	[ "${errors_only}" = 1 ] && when_ok "${ok_mess}" || when_ok "ГОТОВО"
+            rm -f "${ERROR_LOG_FILE}"
+        fi
+}
+
+# ------------------------------------------------------------------------------------------
+#
+#	Печатаем сообщение об ошибке. Для той команды после которой вызывается
+#	эта функция необходимо произвести вывод данных по раздельным каналам
+#	в stdin и stderr: <команда> 1> /dev/null 2> "${ERROR_LOG_FILE}"
+#
+#	$1 - результат выполнения функции -> передаем сюда "${?}"
+# 	$2 - сообщение которое отображает суть ошибки (описание ошибки)
+#
+# ------------------------------------------------------------------------------------------
+when_error()(ready_status "${1}" "${2}" ERROR 0)
+
+log_warning(){
+	logger -t "${APP_NAME_DESC}" "${1}"
+}
+log_error(){
+	logger -p err -t "${APP_NAME_DESC}" "ОШИБКА::${1}"
+}
+log_alert(){
+	header=${2:-${APP_NAME_DESC}}
+	logger -p err -t "${header}" "${1}"
+}
+#
+# Извлекаем ссылку на скачивание пакета с github
+#
+
+get_github_latest_update_url() {
+	arch=$(grep "arch" /opt/etc/entware_release | cut -f2 -d"=")
+	if [ "${arch}" = mipsel ] ; then
+		arch=mipsle_softfloat
+	elif [ "${arch}" = mips ] ; then
+		arch=mips_softfloat
+	elif [ "${arch}" = aarch64 ] ; then
+		arch=arm64
+	fi
+	curl -k -f -s -S "https://api.github.com/repos/${1}/${2}/releases/latest" 2>/dev/null \
+			| jq -r '.assets[] | select(.browser_download_url | contains("linux_'"${arch}"'")) | .browser_download_url'
+}
+
+#  Получаем список гостевых интерфейсов
+get_guest_inface_list(){
+	ip4 a \
+		| grep -E ': br[0-9]:' \
+		| grep -v "$(get_local_inface):" \
+		| cut -d':' -f1-2 \
+		| cut -d' ' -f2\
+		| tr '\n' ' '
+}

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Compatibility entry point. All modes now apply one validated configuration.
+exec /opt/bin/python3 /opt/apps/pivas/bin/main/runtime.py apply
