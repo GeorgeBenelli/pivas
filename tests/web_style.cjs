@@ -7,7 +7,7 @@ const path=require('node:path');
  try{
   const page=await browser.newPage({viewport:{width:1440,height:1080},colorScheme:'dark'}),out=path.resolve(__dirname,'../docs');
   const errors=[],remote=[];page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(!r.url().startsWith('http://127.0.0.1:8879/'))remote.push(r.url());});
-  await page.goto('http://127.0.0.1:8879');await page.getByRole('heading',{name:'YouTube',exact:true}).waitFor();
+  await page.goto('http://127.0.0.1:8879');await page.getByRole('heading',{name:'Медиатека',exact:true}).waitFor();
   await page.locator('#navMore > summary').click();
   assert.equal(await page.locator('#navMore').evaluate(e=>e.open),true);
   await page.locator('#navMore > summary').press('Escape');

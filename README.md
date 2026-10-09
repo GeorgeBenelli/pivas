@@ -2,15 +2,15 @@
 
 **Русский** · [English](README.en.md)
 
-**Выборочная маршрутизация для Keenetic: два VPN-слота, группы доменов, веб и Telegram.**
+**Выборочная маршрутизация для Keenetic: два слота подключения, группы доменов, веб и Telegram.**
 
 Pivas направляет выбранные сайты и IPv4-сети через Xray, а остальной трафик оставляет на обычном подключении. Управлять списками можно с компьютера, телефона или из Telegram.
 
 Текущий комплект: **custom31 · Xray 26.3.27 · MIPSel / AArch64**. Это развивающийся проект: проверка на отдельных устройствах не означает совместимость со всеми моделями Keenetic.
 
-![Веб-интерфейс Pivas на демонстрационных данных](docs/images/dashboard-dark.png)
+![Веб-интерфейс Pivas на демонстрационных данных](docs/images/dashboard-dark-demo.png)
 
-[Светлая тема](docs/images/dashboard-light.png) · [Мобильный интерфейс](docs/images/dashboard-mobile.png)
+[Светлая тема](docs/images/dashboard-light-demo.png) · [Мобильный интерфейс](docs/images/dashboard-mobile-demo.png)
 
 ## Возможности
 
@@ -28,14 +28,25 @@ Pivas направляет выбранные сайты и IPv4-сети чер
 
 Сначала установите Entware на исправный EXT4-накопитель и компоненты Keenetic **Proxy client**, **поддержка открытых пакетов**, **Netfilter**, **EXT**. Подробности и выбор архитектуры — в [INSTALL.md](INSTALL.md).
 
-Скачайте из GitHub Releases архив своей архитектуры, распакуйте его **на компьютере** и передайте `install-pivas-full.sh` в `/opt/tmp/` роутера. В SSH-сессии Entware:
+### Скачать полный установщик
+
+| Архитектура Entware | Прямое скачивание |
+| --- | --- |
+| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+
+Это готовые установщики со встроенным полным пакетом. Выберите архитектуру по `opkg print-architecture`, скачайте файл и при передаче на роутер назовите его **`/opt/tmp/install-pivas-full.sh`**. Для новой установки достаточно одного подходящего `.sh` и доступа к репозиторию Entware.
+
+[Все файлы custom31](https://github.com/GeorgeBenelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+
+В SSH-сессии Entware:
 
 ```sh
 opkg update
 sh /opt/tmp/install-pivas-full.sh
 ```
 
-Установщик предложит ссылки слотов, токен Telegram и ID администратора. Можно пропустить поля Enter и заполнить их позже. На чистой установке VPN, веб и бот не включаются автоматически.
+Установщик предложит ссылки слотов, токен Telegram и ID администратора. Можно пропустить поля Enter и заполнить их позже. На чистой установке маршрутизация, веб и бот не включаются автоматически.
 
 Для настройки через веб:
 

@@ -13,6 +13,17 @@
 - Xray `26.3.27-2`, обёртка `26.3.27-1-custom4`.
 - QUIC-помощник `0.1-1`.
 
+### Скачать полный установщик
+
+| Архитектура Entware | Прямое скачивание |
+| --- | --- |
+| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+
+Это готовые установщики со встроенным полным пакетом. Выберите архитектуру по `opkg print-architecture`, скачайте файл и при передаче на роутер назовите его **`/opt/tmp/install-pivas-full.sh`**. Для новой установки достаточно одного подходящего `.sh` и доступа к репозиторию Entware.
+
+[Все файлы custom31](https://github.com/GeorgeBenelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+
 ## Файлы
 
 - `pivas-custom31-mipsel.tar.gz` — Entware `mipsel-3.4`.

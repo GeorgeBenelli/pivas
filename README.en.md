@@ -2,15 +2,15 @@
 
 [Русский](README.md) · **English**
 
-**Selective routing for Keenetic routers: two VPN slots, domain groups, a web interface and Telegram control.**
+**Selective routing for Keenetic routers: two connection slots, domain groups, a web interface and Telegram control.**
 
 Pivas routes selected websites and IPv4 networks through Xray while leaving other traffic on your regular connection. Manage your routing lists from a computer, a phone or Telegram.
 
 Current bundle: **custom31 · Xray 26.3.27 · MIPSel / AArch64**. This is an evolving project: testing on individual devices does not establish compatibility with every Keenetic model.
 
-![Pivas web interface with demonstration data](docs/images/dashboard-dark.png)
+![Pivas web interface with demonstration data](docs/images/dashboard-dark-demo.png)
 
-[Light theme](docs/images/dashboard-light.png) · [Mobile interface](docs/images/dashboard-mobile.png)
+[Light theme](docs/images/dashboard-light-demo.png) · [Mobile interface](docs/images/dashboard-mobile-demo.png)
 
 ## Features
 
@@ -41,7 +41,18 @@ opkg print-architecture
 
 There is no big-endian MIPS build. KN-1811 uses AArch64. Do not select an IPK solely from a generic `arch: mips` line in KeeneticOS.
 
-Download the archive for your architecture from GitHub Releases, extract it **on your computer**, and copy `install-pivas-full.sh` to `/opt/tmp/` on the router. Run it in Entware over SSH:
+### Download the full installer
+
+| Entware architecture | Direct download |
+| --- | --- |
+| `mipsel-3.4` | [Download install-pivas-full.sh — MIPSel](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (including KN-1811) | [Download install-pivas-full.sh — AArch64](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+
+Each installer embeds the complete package. Check `opkg print-architecture`, download the matching file and name it **`/opt/tmp/install-pivas-full.sh`** when transferring it to the router. A fresh installation needs only that `.sh` file and access to the Entware repository.
+
+[All custom31 downloads](https://github.com/GeorgeBenelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+
+Run it in Entware over SSH:
 
 ```sh
 opkg update
@@ -50,7 +61,7 @@ sh /opt/tmp/install-pivas-full.sh
 
 The installer includes Pivas, Xray, the QUIC helper, the web interface and the Telegram bot. It downloads dependencies from Entware; it does not install Entware or KeeneticOS components.
 
-It prompts for slot URLs, a Telegram bot token and an administrator ID. Press Enter to skip a field and configure it later. VPN routing, the web interface and the bot are not enabled automatically on a fresh installation.
+It prompts for slot URLs, a Telegram bot token and an administrator ID. Press Enter to skip a field and configure it later. Routing, the web interface and the bot are not enabled automatically on a fresh installation.
 
 To configure Pivas through the web interface:
 

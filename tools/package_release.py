@@ -49,6 +49,9 @@ def main():
     for arch in ('mipsel','aarch64'):
         package=next((ROOT/'dist'/arch).glob('pivas-full_*.ipk'))
         shutil.copyfile(package,out/package.name);generated.append(package.name)
+        installer_name='install-pivas-full-'+arch+'.sh'
+        shutil.copyfile(ROOT/'dist'/arch/'install-pivas-full.sh',out/installer_name)
+        generated.append(installer_name)
     for name in ('RELEASE_NOTES.md','RELEASE_NOTES.en.md','THIRD_PARTY_NOTICES.md','LICENSE'):
         shutil.copyfile(ROOT/name,out/name);generated.append(name)
     shutil.copyfile(ROOT/'dist/manifest.json',out/'manifest.json');generated.append('manifest.json')

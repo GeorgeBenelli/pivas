@@ -32,9 +32,9 @@ router.put(rt.XRAY,json.dumps(preview_config))
 
 def create(name,slot,domains):
     catalog.handle(rt,dict(action='create',name=name,slot=slot,domains=domains,revision=catalog.revision(rt)))
-create('YouTube',1,['youtube.com','youtu.be','googlevideo.com','ytimg.com','youtubei.googleapis.com','youtube-nocookie.com','yt3.ggpht.com','youtube.googleapis.com'])
-create('Рабочие сервисы',2,['github.com','githubassets.com','githubusercontent.com'])
-create('Музыка',1,['spotify.com','scdn.co','spotifycdn.com'])
+create('Медиатека',1,['media.example','cdn.media.example','images.media.example','api.media.example','player.media.example','static.media.example','files.media.example','stream.media.example'])
+create('Рабочие сервисы',2,['work.example','assets.work.example','files.work.example'])
+create('Архив',1,['test.example','cdn.test.example','api.test.example'])
 g=catalog.view(rt)['groups'][2]
 catalog.handle(rt,dict(action='toggle',id=g['id'],enabled=False,revision=catalog.revision(rt)))
 

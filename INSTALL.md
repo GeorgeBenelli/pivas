@@ -6,7 +6,7 @@
 - Компоненты KeeneticOS: «Поддержка открытых пакетов», поддержка EXT, «Модули ядра подсистемы Netfilter» и **Proxy client**. Proxy client ищите по `proxy` / `прокси` в общем списке компонентов; он не является пакетом Entware.
 - Доступ root к Entware по SSH и интернет для загрузки зависимостей.
 - Совместимая архитектура: `mipsel-3.4` или `aarch64-3.10`.
-- Исправный VPN-сервер и ссылка подключения. Сервер проект не предоставляет.
+- Исправный сервер выбранного протокола и ссылка подключения. Сервер проект не предоставляет.
 
 [Официальная установка Entware на USB](https://support.keenetic.com/hero/kn-1012/en/20980-installing-the-entware-repository-on-a-usb-drive.html). При замене флешки выберите новый накопитель в настройках OPKG; одно совпадение имени тома не восстанавливает старую установку. Настройки с погибшей флешки восстанавливаются из резервной копии.
 
@@ -25,6 +25,17 @@ opkg print-architecture
 
 `mips` и `mipsel` — разные архитектуры. Общая строка `arch: mips` в Keenetic сама по себе не определяет подходящий IPK. Для MIPS big-endian сборки Pivas пока нет. KN-1811 использует AArch64.
 
+### Скачать полный установщик
+
+| Архитектура Entware | Прямое скачивание |
+| --- | --- |
+| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+
+Это готовые установщики со встроенным полным пакетом. Выберите архитектуру по `opkg print-architecture`, скачайте файл и при передаче на роутер назовите его **`/opt/tmp/install-pivas-full.sh`**. Для новой установки достаточно одного подходящего `.sh` и доступа к репозиторию Entware.
+
+[Все файлы custom31](https://github.com/GeorgeBenelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+
 ## Какой установщик выбрать
 
 | Файл внутри архива | Состав |
@@ -37,7 +48,7 @@ opkg print-architecture
 
 ## Порядок
 
-1. Скачайте архив своей архитектуры из Releases и распакуйте на компьютере. Файл SHA256SUMS позволяет проверить архив: `shasum -a 256 -c SHA256SUMS` на macOS или `sha256sum -c SHA256SUMS` на Linux (для полной проверки скачайте все перечисленные файлы).
+1. Скачайте полный установщик своей архитектуры по ссылке выше. Альтернатива — скачать архив архитектуры из Releases и распаковать его на компьютере. Файл SHA256SUMS позволяет проверить архив: `shasum -a 256 -c SHA256SUMS` на macOS или `sha256sum -c SHA256SUMS` на Linux (для полной проверки скачайте все перечисленные файлы).
 2. Передайте `install-pivas-full.sh` через SCP/SFTP в `/opt/tmp/` роутера. SSH Entware обычно работает на 222, когда системный SSH Keenetic занимает 22; используйте фактический порт своего устройства.
 3. Запустите:
 
@@ -53,7 +64,7 @@ opkg print-architecture
 
 ## IPv6
 
-Pivas custom31 управляет IPv4. Если нужен обход только по правилам Pivas, отключите внешний IPv6 в настройках своего интернет-подключения Keenetic и проверьте `ip -6 route show default`. Не копируйте имена WAN-интерфейсов с другого роутера. Наличие компонента IPv6 не равнозначно активному IPv6-интернету.
+Pivas custom31 управляет IPv4. Если трафик должен следовать только правилам Pivas, отключите внешний IPv6 в настройках своего интернет-подключения Keenetic и проверьте `ip -6 route show default`. Не копируйте имена WAN-интерфейсов с другого роутера. Наличие компонента IPv6 не равнозначно активному IPv6-интернету.
 
 ## Восстановление DNS-служб
 

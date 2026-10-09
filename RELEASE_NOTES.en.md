@@ -13,6 +13,17 @@ The new `pivas repair-dns` command checks these files. Diagnostic reports includ
 - Xray `26.3.27-2`, Xray wrapper `26.3.27-1-custom4`.
 - QUIC helper `0.1-1`.
 
+### Download the full installer
+
+| Entware architecture | Direct download |
+| --- | --- |
+| `mipsel-3.4` | [Download install-pivas-full.sh — MIPSel](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (including KN-1811) | [Download install-pivas-full.sh — AArch64](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+
+Each installer embeds the complete package. Check `opkg print-architecture`, download the matching file and name it **`/opt/tmp/install-pivas-full.sh`** when transferring it to the router. A fresh installation needs only that `.sh` file and access to the Entware repository.
+
+[All custom31 downloads](https://github.com/GeorgeBenelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+
 ## Downloads
 
 - `pivas-custom31-mipsel.tar.gz` — Entware `mipsel-3.4`.

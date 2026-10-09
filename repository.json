@@ -1,6 +1,6 @@
 {
   "name": "pivas",
-  "description": "Выборочная маршрутизация для Keenetic: Xray, два VPN-слота, группы доменов, раздельный DNS, веб и Telegram.",
+  "description": "Выборочная маршрутизация для Keenetic: Xray, два слота подключения, группы доменов, раздельный DNS, веб и Telegram.",
   "topics": [
     "keenetic",
     "entware",
@@ -15,8 +15,8 @@
   "release_tag": "v1.1.9-25-custom31",
   "release_title": "Pivas custom31 — восстановление DNS-служб",
   "release_prerelease": true,
-  "description_ru": "Выборочная маршрутизация для Keenetic: Xray, два VPN-слота, группы доменов, раздельный DNS, веб и Telegram.",
-  "description_en": "Selective routing for Keenetic routers: Xray, two VPN slots, domain groups, split DNS, a web interface and Telegram control.",
+  "description_ru": "Выборочная маршрутизация для Keenetic: Xray, два слота подключения, группы доменов, раздельный DNS, веб и Telegram.",
+  "description_en": "Selective routing for Keenetic routers: Xray, two connection slots, domain groups, split DNS, a web interface and Telegram control.",
   "readme_languages": {
     "ru": "README.md",
     "en": "README.en.md"
