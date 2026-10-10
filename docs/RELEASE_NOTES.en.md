@@ -37,4 +37,4 @@ Choose the architecture shown by `opkg print-architecture`. Entware, EXT, Netfil
 
 Routing targets IPv4. IPv6 and application-level DoH are not automatically covered. In 1.2.0-beta.1, the XHTTP importer rejects a duplicate `mode` inside the `extra` JSON object. Hysteria 2 requires working UDP connectivity. MIPSel uses a Go 1.26.6 compatibility build; AArch64 uses the official Xray binary.
 
-This is a prerelease. Local preparation checks are recorded in `VALIDATION.md` (Russian); automated tests are distinct from validation on individual routers. Before publicly distributing the complete bundle, resolve the upstream Telegram bot licensing question described in `THIRD_PARTY_NOTICES.md` and `LICENSE`.
+This is a prerelease. Current [installation instructions](../README.en.md#installation) and [validation results](VALIDATION.md) are maintained on `main`; the tagged source archive reflects the release-time snapshot. Automated tests are distinct from validation on individual routers. Upstream Telegram bot redistribution permission remains unresolved; see [third-party notices](../THIRD_PARTY_NOTICES.md) and [LICENSE](../LICENSE).
