@@ -17,22 +17,20 @@ The new `pivas repair-dns` command checks these files. Diagnostic reports includ
 
 | Entware architecture | Direct download |
 | --- | --- |
-| `mipsel-3.4` | [Download install-pivas-full.sh — MIPSel](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
-| `aarch64-3.10` (including KN-1811) | [Download install-pivas-full.sh — AArch64](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+| `mipsel-3.4` | [Download install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (including KN-1811) | [Download install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
 
 Each installer embeds the complete package. Check `opkg print-architecture`, download the matching file and name it **`/opt/tmp/install-pivas-full.sh`** when transferring it to the router. A fresh installation needs only that `.sh` file and access to the Entware repository.
 
-[All custom31 downloads](https://github.com/GeorgeBenelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+[All custom31 downloads](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
 
-## Downloads
+## Release files
 
-- `pivas-custom31-mipsel.tar.gz` — Entware `mipsel-3.4`.
-- `pivas-custom31-aarch64.tar.gz` — Entware `aarch64-3.10`.
-- `pivas-custom31-common.tar.gz` — architecture-independent IPKs for modular installations.
-- `pivas-full_...ipk` — the complete package for the matching architecture, suitable for SSH updates or a compatible Telegram bot.
-- `SHA256SUMS` and `manifest.json` — checksums for release downloads and the individual packages/installers.
+- `install-pivas-full-mipsel.sh` / `install-pivas-full-aarch64.sh` — the complete installer for a fresh installation.
+- `pivas-full_...ipk` — the complete package for updates over SSH or Telegram.
+- `SHA256SUMS` and `manifest.json` — checksums and component versions.
 
-For a fresh installation, use `install-pivas-full.sh` from the archive for your architecture. Entware, EXT, Netfilter and Proxy client are prerequisites. Configure your connection URLs and explicitly enable Pivas after installation. Enable the web interface and bot separately when needed.
+Choose the architecture shown by `opkg print-architecture`. Entware, EXT, Netfilter and Proxy client are prerequisites. Configure the connection URLs and explicitly enable Pivas after installation; enable the web interface and bot when needed.
 
 ## Known limitations
 

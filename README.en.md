@@ -26,7 +26,7 @@ Current bundle: **custom31 · Xray 26.3.27 · MIPSel / AArch64**. This is an evo
 
 ## Installation
 
-First install Entware on a working EXT4 drive and enable these KeeneticOS components: **Proxy client**, **Open Package support**, **Netfilter**, and **EXT filesystem support**. See [INSTALL.md](INSTALL.md) for details (Russian).
+First install Entware on a working EXT4 drive and enable these KeeneticOS components: **Proxy client**, **Open Package support**, **Netfilter**, and **EXT filesystem support**. See [docs/INSTALL.md](docs/INSTALL.md) for details (Russian).
 
 Check the architecture in your Entware SSH session:
 
@@ -34,10 +34,10 @@ Check the architecture in your Entware SSH session:
 opkg print-architecture
 ```
 
-| Entware architecture | Release archive |
+| Entware architecture | Full installer |
 | --- | --- |
-| `mipsel-3.4` | `pivas-custom31-mipsel.tar.gz` |
-| `aarch64-3.10` | `pivas-custom31-aarch64.tar.gz` |
+| `mipsel-3.4` | `install-pivas-full-mipsel.sh` |
+| `aarch64-3.10` | `install-pivas-full-aarch64.sh` |
 
 There is no big-endian MIPS build. KN-1811 uses AArch64. Do not select an IPK solely from a generic `arch: mips` line in KeeneticOS.
 
@@ -45,12 +45,12 @@ There is no big-endian MIPS build. KN-1811 uses AArch64. Do not select an IPK so
 
 | Entware architecture | Direct download |
 | --- | --- |
-| `mipsel-3.4` | [Download install-pivas-full.sh — MIPSel](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
-| `aarch64-3.10` (including KN-1811) | [Download install-pivas-full.sh — AArch64](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+| `mipsel-3.4` | [Download install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (including KN-1811) | [Download install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
 
 Each installer embeds the complete package. Check `opkg print-architecture`, download the matching file and name it **`/opt/tmp/install-pivas-full.sh`** when transferring it to the router. A fresh installation needs only that `.sh` file and access to the Entware repository.
 
-[All custom31 downloads](https://github.com/GeorgeBenelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+[All custom31 downloads](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
 
 Run it in Entware over SSH:
 
@@ -81,18 +81,17 @@ The slot test checks the route through Xray. A successful test on the router doe
 
 ## Documentation
 
-The detailed guides below are currently in Russian. This README, the short project descriptions and release notes are available in both languages.
+The detailed guides below are currently in Russian. This README and the release notes are available in both languages.
 
 | Task | Guide |
 | --- | --- |
-| Fresh installation, Entware and package selection | [Installation](INSTALL.md) |
-| Slots, groups, devices and Telegram | [Configuration](SETUP.md) |
+| Fresh installation, Entware and package selection | [Installation](docs/INSTALL.md) |
+| Slots, groups, devices and Telegram | [Configuration](docs/SETUP.md) |
 | DNS, routing and limitations | [Architecture](docs/ARCHITECTURE.md) |
 | Updating over SSH or Telegram | [Updates](docs/UPDATING.md) |
 | Unreachable websites or services that fail to start | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | Builds, tests and local web preview | [Development](docs/DEVELOPMENT.md) |
-| Changes in custom31 | [Release notes in English](RELEASE_NOTES.en.md) |
-| GitHub About descriptions | [Russian and English descriptions](ABOUT.md) |
+| Changes in custom31 | [Release notes in English](docs/RELEASE_NOTES.en.md) |
 | Third-party source provenance | [Third-party notices](THIRD_PARTY_NOTICES.md) |
 
 ## Limitations and security

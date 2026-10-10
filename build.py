@@ -178,7 +178,7 @@ def xray_packages(arch):
     return core, wrapper
 
 
-def installer(arch, packages, flavor):
+def installer(arch, packages):
     contents = {p.name: (p.read_bytes(), 0o644) for p in packages}
     script = '''#!/bin/sh
 set -eu
@@ -236,7 +236,7 @@ echo 'Далее: pivas start; pivas bot on. Веб остаётся выклю�
 exit 0
 __PAYLOAD__
 '''.replace("@ARCH@", arch).replace("@GUARD@", INSTALL_GUARD).replace("@INSTALL@", "\n".join('opkg install "$TMP/' + p.name + '"' for p in packages))
-    p = DIST / arch.split("-")[0] / ("install-pivas" + flavor + ".sh")
+    p = DIST / arch.split("-")[0] / "install-pivas-full.sh"
     p.write_bytes(script.encode() + archive(contents))
     p.chmod(0o755)
 
@@ -251,7 +251,6 @@ def build():
     bot = bot_package()
     for arch in ("mipsel-3.4", "aarch64-3.10"):
         binary, wrapper = xray_packages(arch)
-        binary_out = binary[0]
         probe = quic_package(arch)
         merged = {}
         all_parts = [binary, wrapper, probe, core, web, bot]
@@ -269,9 +268,7 @@ def build():
             if "postinst" in part[2]:
                 post += "(\n" + part[2]["postinst"][0].decode() + "\n)\n"
         full = package("pivas-full", arch, merged, {"control": (control.encode(), 0o644), "postinst": (post.encode(), 0o755), "prerm": (("#!/bin/sh\n/opt/etc/init.d/S98telegram4pivas stop 2>/dev/null || true\n/opt/etc/init.d/S99pivas-web stop 2>/dev/null || true\n" + core[2]["prerm"][0].decode()).encode(), 0o755)})
-        installer(arch, [binary_out, wrapper[0], probe[0], core[0], bot[0]], "")
-        installer(arch, [binary_out, wrapper[0], probe[0], core[0], web[0], bot[0]], "-web")
-        installer(arch, [full[0]], "-full")
+        installer(arch, [full[0]])
     sums = {}
     for p in sorted(DIST.rglob("*")):
         if p.is_file() and p.name != "manifest.json":

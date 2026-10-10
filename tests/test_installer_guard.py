@@ -23,10 +23,10 @@ class InstallerGuardTests(unittest.TestCase):
             old_dist = builder.DIST
             try:
                 builder.DIST = root
-                builder.installer('mipsel-3.4', [package], '')
+                builder.installer('mipsel-3.4', [package])
             finally:
                 builder.DIST = old_dist
-            installer = root/'mipsel/install-pivas.sh'
+            installer = root/'mipsel/install-pivas-full.sh'
             installer.write_bytes(installer.read_bytes().replace(b'/opt/tmp', str(root/'opt-tmp').encode()))
             bins = root/'bin'; bins.mkdir()
             for name, content in {
@@ -52,8 +52,8 @@ class InstallerGuardTests(unittest.TestCase):
                 (Path(tmp) / 'mipsel').mkdir()
                 package = Path(tmp) / 'dummy.ipk'
                 package.write_bytes(b'dummy')
-                builder.installer('mipsel-3.4', [package], '')
-                header = (Path(tmp) / 'mipsel/install-pivas.sh').read_bytes().split(b'\n__PAYLOAD__\n')[0].decode()
+                builder.installer('mipsel-3.4', [package])
+                header = (Path(tmp) / 'mipsel/install-pivas-full.sh').read_bytes().split(b'\n__PAYLOAD__\n')[0].decode()
             finally:
                 builder.DIST = old_dist
             setup = header[header.index('# Interactive setup'):header.index("echo 'Пакеты установлены")]

@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 s = importlib.util.spec_from_file_location('builder', ROOT / 'build.py')
 b = importlib.util.module_from_spec(s); s.loader.exec_module(b)
 manifest = json.loads((ROOT / 'dist/manifest.json').read_text())
-assert len(manifest['sha256']) == 17
+assert len(manifest['sha256']) == 13
 for name, expected in manifest['sha256'].items():
     assert hashlib.sha256((ROOT/'dist'/name).read_bytes()).hexdigest() == expected, name
 
@@ -58,6 +58,7 @@ for arch in ('mipsel','aarch64'):
     merged={}
     for group in (unpack(binary),unpack(wrapper),unpack(probe),core,web,bot):merged.update(group)
     assert full == merged
+    assert {p.name for p in directory.glob('install-*.sh')} == {'install-pivas-full.sh'}
     for installer in directory.glob('install-*.sh'):
         header,payload=installer.read_bytes().split(b'\n__PAYLOAD__\n',1)
         assert b'\npivas repair-dns\n' in header
@@ -71,5 +72,5 @@ for arch in ('mipsel','aarch64'):
                 candidates=[directory/name,ROOT/'dist/common'/name]
                 actual=next(p for p in candidates if p.exists())
                 assert archive.extractfile(m).read() == actual.read_bytes()
-            assert len(names) == (1 if installer.name.endswith('-full.sh') else 6 if installer.name.endswith('-web.sh') else 5)
-print('Verified: 17 artifacts; source/package parity; both full bundles; six installer payloads; Xray 26.3.27 including compatible MIPS build; no runtime secrets/cache/logs.')
+            assert len(names) == 1
+print('Verified: 13 build artifacts; source/package parity; both full bundles; two full installer payloads; Xray 26.3.27 including compatible MIPS build; no runtime secrets/cache/logs.')

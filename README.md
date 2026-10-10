@@ -26,18 +26,18 @@ Pivas направляет выбранные сайты и IPv4-сети чер
 
 ## Установка
 
-Сначала установите Entware на исправный EXT4-накопитель и компоненты Keenetic **Proxy client**, **поддержка открытых пакетов**, **Netfilter**, **EXT**. Подробности и выбор архитектуры — в [INSTALL.md](INSTALL.md).
+Сначала установите Entware на исправный EXT4-накопитель и компоненты Keenetic **Proxy client**, **поддержка открытых пакетов**, **Netfilter**, **EXT**. Подробности и выбор архитектуры — в [docs/INSTALL.md](docs/INSTALL.md).
 
 ### Скачать полный установщик
 
 | Архитектура Entware | Прямое скачивание |
 | --- | --- |
-| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
-| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
 
 Это готовые установщики со встроенным полным пакетом. Выберите архитектуру по `opkg print-architecture`, скачайте файл и при передаче на роутер назовите его **`/opt/tmp/install-pivas-full.sh`**. Для новой установки достаточно одного подходящего `.sh` и доступа к репозиторию Entware.
 
-[Все файлы custom31](https://github.com/GeorgeBenelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+[Все файлы custom31](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
 
 В SSH-сессии Entware:
 
@@ -60,13 +60,13 @@ pivas web on 'ЗАМЕНИТЕ_НА_СВОЙ_ПАРОЛЬ'
 
 | Задача | Инструкция |
 | --- | --- |
-| Чистая установка, Entware и выбор пакета | [Установка](INSTALL.md) |
-| Слоты, группы, устройства и бот | [Настройка](SETUP.md) |
+| Чистая установка, Entware и выбор пакета | [Установка](docs/INSTALL.md) |
+| Слоты, группы, устройства и бот | [Настройка](docs/SETUP.md) |
 | DNS, маршруты и ограничения | [Архитектура](docs/ARCHITECTURE.md) |
 | Обновление через SSH или Telegram | [Обновление](docs/UPDATING.md) |
 | Не открываются сайты, не запускается служба | [Диагностика](docs/TROUBLESHOOTING.md) |
 | Сборка, тесты и демо веба | [Разработка](docs/DEVELOPMENT.md) |
-| Изменения custom31 | [История версий](CHANGELOG.md) |
+| Изменения custom31 | [История версий](docs/CHANGELOG.md) |
 | Происхождение стороннего кода | [Лицензии и авторы](THIRD_PARTY_NOTICES.md) |
 
 ## Что важно знать

@@ -17,22 +17,20 @@
 
 | Архитектура Entware | Прямое скачивание |
 | --- | --- |
-| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
-| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
 
 Это готовые установщики со встроенным полным пакетом. Выберите архитектуру по `opkg print-architecture`, скачайте файл и при передаче на роутер назовите его **`/opt/tmp/install-pivas-full.sh`**. Для новой установки достаточно одного подходящего `.sh` и доступа к репозиторию Entware.
 
-[Все файлы custom31](https://github.com/GeorgeBenelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/GeorgeBenelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+[Все файлы custom31](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
 
-## Файлы
+## Файлы релиза
 
-- `pivas-custom31-mipsel.tar.gz` — Entware `mipsel-3.4`.
-- `pivas-custom31-aarch64.tar.gz` — Entware `aarch64-3.10`.
-- `pivas-custom31-common.tar.gz` — общие IPK для модульного варианта.
-- `pivas-full_...ipk` — полный пакет соответствующей архитектуры для обновления через SSH или совместимого Telegram-бота.
-- `SHA256SUMS` и `manifest.json` — проверка загруженных файлов и внутренних пакетов.
+- `install-pivas-full-mipsel.sh` / `install-pivas-full-aarch64.sh` — полный установщик для новой установки.
+- `pivas-full_...ipk` — полный пакет для обновления через SSH или Telegram.
+- `SHA256SUMS` и `manifest.json` — контрольные суммы и версии компонентов.
 
-Для новой установки используйте `install-pivas-full.sh` из нужного архива. Требуются Entware, EXT, Netfilter и Proxy client. После установки настройте ссылки и явно запустите Pivas; веб и бот включаются отдельно.
+Архитектуру определяйте по `opkg print-architecture`. Требуются Entware, EXT, Netfilter и Proxy client. После установки настройте ссылки и явно запустите Pivas; веб и бот включаются отдельно.
 
 ## Ограничения
 
