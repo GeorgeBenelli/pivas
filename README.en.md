@@ -6,7 +6,7 @@
 
 Pivas routes selected websites and IPv4 networks through Xray while leaving other traffic on your regular connection. Manage your routing lists from a computer, a phone or Telegram.
 
-Current bundle: **custom31 · Xray 26.3.27 · MIPSel / AArch64**. This is an evolving project: testing on individual devices does not establish compatibility with every Keenetic model.
+Current bundle: **1.2.0-beta.1 · Xray 26.3.27 · MIPSel / AArch64**. This is an evolving project: testing on individual devices does not establish compatibility with every Keenetic model.
 
 ![Pivas web interface with demonstration data](docs/images/dashboard-dark-demo.png)
 
@@ -45,12 +45,12 @@ There is no big-endian MIPS build. KN-1811 uses AArch64. Do not select an IPK so
 
 | Entware architecture | Direct download |
 | --- | --- |
-| `mipsel-3.4` | [Download install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
-| `aarch64-3.10` (including KN-1811) | [Download install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+| `mipsel-3.4` | [Download install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (including KN-1811) | [Download install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-aarch64.sh) |
 
 Each installer embeds the complete package. Check `opkg print-architecture`, download the matching file and name it **`/opt/tmp/install-pivas-full.sh`** when transferring it to the router. A fresh installation needs only that `.sh` file and access to the Entware repository.
 
-[All custom31 downloads](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+[All 1.2.0-beta.1 downloads](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.2.0-beta.1) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/SHA256SUMS)
 
 Run it in Entware over SSH:
 
@@ -91,7 +91,7 @@ The detailed guides below are currently in Russian. This README and the release 
 | Updating over SSH or Telegram | [Updates](docs/UPDATING.md) |
 | Unreachable websites or services that fail to start | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | Builds, tests and local web preview | [Development](docs/DEVELOPMENT.md) |
-| Changes in custom31 | [Release notes in English](docs/RELEASE_NOTES.en.md) |
+| Changes in 1.2.0-beta.1 | [Release notes in English](docs/RELEASE_NOTES.en.md) |
 | Third-party source provenance | [Third-party notices](THIRD_PARTY_NOTICES.md) |
 
 ## Limitations and security

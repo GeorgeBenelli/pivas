@@ -18,23 +18,18 @@
 opkg print-architecture
 ```
 
-| Вывод Entware | Архив Pivas |
-| --- | --- |
-| `mipsel-3.4` | `pivas-custom31-mipsel.tar.gz` |
-| `aarch64-3.10` | `pivas-custom31-aarch64.tar.gz` |
-
 `mips` и `mipsel` — разные архитектуры. Общая строка `arch: mips` в Keenetic сама по себе не определяет подходящий IPK. Для MIPS big-endian сборки Pivas пока нет. KN-1811 использует AArch64.
 
 ### Скачать полный установщик
 
 | Архитектура Entware | Прямое скачивание |
 | --- | --- |
-| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
-| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-aarch64.sh) |
 
 Это готовые установщики со встроенным полным пакетом. Выберите архитектуру по `opkg print-architecture`, скачайте файл и при передаче на роутер назовите его **`/opt/tmp/install-pivas-full.sh`**. Для новой установки достаточно одного подходящего `.sh` и доступа к репозиторию Entware.
 
-[Все файлы custom31](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+[Все файлы 1.2.0-beta.1](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.2.0-beta.1) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/SHA256SUMS)
 
 ## Полный установщик
 
@@ -44,7 +39,7 @@ opkg print-architecture
 
 ## Порядок
 
-1. Скачайте полный установщик своей архитектуры по ссылке выше. Файл SHA256SUMS позволяет проверить архив: `shasum -a 256 -c SHA256SUMS` на macOS или `sha256sum -c SHA256SUMS` на Linux (для полной проверки скачайте все перечисленные файлы).
+1. Скачайте полный установщик своей архитектуры по ссылке выше. Файл SHA256SUMS позволяет проверить скачанные файлы: `shasum -a 256 -c SHA256SUMS` на macOS или `sha256sum -c SHA256SUMS` на Linux (для полной проверки скачайте все перечисленные файлы).
 2. Передайте `install-pivas-full.sh` через SCP/SFTP в `/opt/tmp/` роутера. SSH Entware обычно работает на 222, когда системный SSH Keenetic занимает 22; используйте фактический порт своего устройства.
 3. Запустите:
 
@@ -60,11 +55,11 @@ opkg print-architecture
 
 ## IPv6
 
-Pivas custom31 управляет IPv4. Если трафик должен следовать только правилам Pivas, отключите внешний IPv6 в настройках своего интернет-подключения Keenetic и проверьте `ip -6 route show default`. Не копируйте имена WAN-интерфейсов с другого роутера. Наличие компонента IPv6 не равнозначно активному IPv6-интернету.
+Pivas 1.2.0-beta.1 управляет IPv4. Если трафик должен следовать только правилам Pivas, отключите внешний IPv6 в настройках своего интернет-подключения Keenetic и проверьте `ip -6 route show default`. Не копируйте имена WAN-интерфейсов с другого роутера. Наличие компонента IPv6 не равнозначно активному IPv6-интернету.
 
 ## Восстановление DNS-служб
 
-В custom31 установка и `pivas start` проверяют файлы служб DNS. Отсутствующие init-скрипты восстанавливаются из шаблонов, если бинарники зависимостей и Entware `rc.func` на месте. Повреждённые зависимости требуют ремонта, а не маскируются:
+В 1.2.0-beta.1 установка и `pivas start` проверяют файлы служб DNS. Отсутствующие init-скрипты восстанавливаются из шаблонов, если бинарники зависимостей и Entware `rc.func` на месте. Повреждённые зависимости требуют ремонта, а не маскируются:
 
 ```sh
 pivas repair-dns

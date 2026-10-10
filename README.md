@@ -6,7 +6,7 @@
 
 Pivas направляет выбранные сайты и IPv4-сети через Xray, а остальной трафик оставляет на обычном подключении. Управлять списками можно с компьютера, телефона или из Telegram.
 
-Текущий комплект: **custom31 · Xray 26.3.27 · MIPSel / AArch64**. Это развивающийся проект: проверка на отдельных устройствах не означает совместимость со всеми моделями Keenetic.
+Текущий комплект: **1.2.0-beta.1 · Xray 26.3.27 · MIPSel / AArch64**. Это развивающийся проект: проверка на отдельных устройствах не означает совместимость со всеми моделями Keenetic.
 
 ![Веб-интерфейс Pivas на демонстрационных данных](docs/images/dashboard-dark-demo.png)
 
@@ -32,12 +32,12 @@ Pivas направляет выбранные сайты и IPv4-сети чер
 
 | Архитектура Entware | Прямое скачивание |
 | --- | --- |
-| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
-| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-aarch64.sh) |
 
 Это готовые установщики со встроенным полным пакетом. Выберите архитектуру по `opkg print-architecture`, скачайте файл и при передаче на роутер назовите его **`/opt/tmp/install-pivas-full.sh`**. Для новой установки достаточно одного подходящего `.sh` и доступа к репозиторию Entware.
 
-[Все файлы custom31](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+[Все файлы 1.2.0-beta.1](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.2.0-beta.1) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/SHA256SUMS)
 
 В SSH-сессии Entware:
 
@@ -66,7 +66,7 @@ pivas web on 'ЗАМЕНИТЕ_НА_СВОЙ_ПАРОЛЬ'
 | Обновление через SSH или Telegram | [Обновление](docs/UPDATING.md) |
 | Не открываются сайты, не запускается служба | [Диагностика](docs/TROUBLESHOOTING.md) |
 | Сборка, тесты и демо веба | [Разработка](docs/DEVELOPMENT.md) |
-| Изменения custom31 | [История версий](docs/CHANGELOG.md) |
+| Изменения 1.2.0-beta.1 | [История версий](docs/CHANGELOG.md) |
 | Происхождение стороннего кода | [Лицензии и авторы](THIRD_PARTY_NOTICES.md) |
 
 ## Что важно знать

@@ -1,4 +1,4 @@
-# Pivas custom31 — восстановление DNS-служб
+# Pivas 1.2.0-beta.1 — восстановление DNS-служб
 
 **Русский** · [English](RELEASE_NOTES.en.md)
 
@@ -17,12 +17,12 @@
 
 | Архитектура Entware | Прямое скачивание |
 | --- | --- |
-| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
-| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-aarch64.sh) |
 
 Это готовые установщики со встроенным полным пакетом. Выберите архитектуру по `opkg print-architecture`, скачайте файл и при передаче на роутер назовите его **`/opt/tmp/install-pivas-full.sh`**. Для новой установки достаточно одного подходящего `.sh` и доступа к репозиторию Entware.
 
-[Все файлы custom31](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+[Все файлы 1.2.0-beta.1](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.2.0-beta.1) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/SHA256SUMS)
 
 ## Файлы релиза
 
@@ -35,6 +35,6 @@
 
 ## Ограничения
 
-IPv4-маршрутизация; IPv6 и собственный DoH приложения не охватываются автоматически. В custom31 импорт XHTTP не принимает дублированный `mode` внутри JSON `extra`. Hysteria 2 требует доступного UDP. MIPSel использует сборку Go 1.26.6 для совместимости; AArch64 — официальный бинарник Xray.
+IPv4-маршрутизация; IPv6 и собственный DoH приложения не охватываются автоматически. В 1.2.0-beta.1 импорт XHTTP не принимает дублированный `mode` внутри JSON `extra`. Hysteria 2 требует доступного UDP. MIPSel использует сборку Go 1.26.6 для совместимости; AArch64 — официальный бинарник Xray.
 
 Это предварительный выпуск. Результаты локальной проверки подготовки репозитория — в `VALIDATION.md`; CI и проверка на конкретных устройствах различаются. До публикации полного комплекта нужно закрыть вопрос лицензии исходного Telegram-бота, описанный в `THIRD_PARTY_NOTICES.md`.

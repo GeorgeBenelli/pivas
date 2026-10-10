@@ -1,4 +1,4 @@
-# Pivas custom31 — DNS service recovery
+# Pivas 1.2.0-beta.1 — DNS service recovery
 
 [Русский](RELEASE_NOTES.md) · **English**
 
@@ -17,12 +17,12 @@ The new `pivas repair-dns` command checks these files. Diagnostic reports includ
 
 | Entware architecture | Direct download |
 | --- | --- |
-| `mipsel-3.4` | [Download install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-mipsel.sh) |
-| `aarch64-3.10` (including KN-1811) | [Download install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/install-pivas-full-aarch64.sh) |
+| `mipsel-3.4` | [Download install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-mipsel.sh) |
+| `aarch64-3.10` (including KN-1811) | [Download install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-aarch64.sh) |
 
 Each installer embeds the complete package. Check `opkg print-architecture`, download the matching file and name it **`/opt/tmp/install-pivas-full.sh`** when transferring it to the router. A fresh installation needs only that `.sh` file and access to the Entware repository.
 
-[All custom31 downloads](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.1.9-25-custom31) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.1.9-25-custom31/SHA256SUMS)
+[All 1.2.0-beta.1 downloads](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.2.0-beta.1) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/SHA256SUMS)
 
 ## Release files
 
@@ -35,6 +35,6 @@ Choose the architecture shown by `opkg print-architecture`. Entware, EXT, Netfil
 
 ## Known limitations
 
-Routing targets IPv4. IPv6 and application-level DoH are not automatically covered. In custom31, the XHTTP importer rejects a duplicate `mode` inside the `extra` JSON object. Hysteria 2 requires working UDP connectivity. MIPSel uses a Go 1.26.6 compatibility build; AArch64 uses the official Xray binary.
+Routing targets IPv4. IPv6 and application-level DoH are not automatically covered. In 1.2.0-beta.1, the XHTTP importer rejects a duplicate `mode` inside the `extra` JSON object. Hysteria 2 requires working UDP connectivity. MIPSel uses a Go 1.26.6 compatibility build; AArch64 uses the official Xray binary.
 
 This is a prerelease. Local preparation checks are recorded in `VALIDATION.md` (Russian); automated tests are distinct from validation on individual routers. Before publicly distributing the complete bundle, resolve the upstream Telegram bot licensing question described in `THIRD_PARTY_NOTICES.md` and `LICENSE`.

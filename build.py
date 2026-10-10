@@ -14,7 +14,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
-VERSIONS = {"pivas": "1.1.9_beta-10-25-custom25", "pivas-web": "1.0-custom20", "telegram4pivas": "1.2-custom14", "pivas-full": "1.1.9-25-custom31", "xray": "26.3.27-1-custom4", "xray-core": "26.3.27-2", "pivas-quic-probe": "0.1-1"}
+VERSIONS = {"pivas": "1.1.9_beta-10-25-custom25", "pivas-web": "1.0-custom20", "telegram4pivas": "1.2-custom14", "pivas-full": "1.2.0-beta.1", "xray": "26.3.27-1-custom4", "xray-core": "26.3.27-2", "pivas-quic-probe": "0.1-1"}
 EPOCH = 1790370000
 
 # Refuse an unrelated owner of shared network hooks, independently of its name.
@@ -182,7 +182,7 @@ def installer(arch, packages):
     contents = {p.name: (p.read_bytes(), 0o644) for p in packages}
     script = '''#!/bin/sh
 set -eu
-case "${1:-}" in --help|-h) echo "Установка Pivas custom31 (Xray 26.3.27); запуск после настройки: pivas start"; exit 0 ;; esac
+case "${1:-}" in --help|-h) echo "Установка Pivas 1.2.0-beta.1 (Xray 26.3.27); запуск после настройки: pivas start"; exit 0 ;; esac
 [ "$(id -u)" = 0 ] || { echo 'Нужен root'; exit 1; }
 command -v opkg >/dev/null || { echo 'Нужен Entware'; exit 1; }
 opkg print-architecture | awk '{print $2}' | grep -qx '@ARCH@' || { echo 'Неверная архитектура'; exit 1; }
@@ -262,7 +262,7 @@ def build():
                     dependencies.update(x.strip() for x in line.partition(":")[2].split(","))
         included = {"pivas", "pivas-web", "telegram4pivas", "xray", "xray-core", "xray-any", "xray-core-any", "pivas-quic-probe"}
         dependencies = {d for d in dependencies if d.split()[0] not in included}
-        control = "Package: pivas-full\nVersion: " + VERSIONS["pivas-full"] + "\nArchitecture: " + arch + "\nDepends: " + ", ".join(sorted(dependencies)) + "\nProvides: pivas-quic-probe, pivas, pivas-web, telegram4pivas, xray, xray-core, xray-any, xray-core-any\nConflicts: pivas-quic-probe, pivas, pivas-web, telegram4pivas, xray, xray-core\nReplaces: pivas-quic-probe, pivas, pivas-web, telegram4pivas, xray, xray-core\nInstalled-Size: 0\nDescription: Pivas custom31 complete bundle; Xray 26.3.27; activation is explicit\n"
+        control = "Package: pivas-full\nVersion: " + VERSIONS["pivas-full"] + "\nArchitecture: " + arch + "\nDepends: " + ", ".join(sorted(dependencies)) + "\nProvides: pivas-quic-probe, pivas, pivas-web, telegram4pivas, xray, xray-core, xray-any, xray-core-any\nConflicts: pivas-quic-probe, pivas, pivas-web, telegram4pivas, xray, xray-core\nReplaces: pivas-quic-probe, pivas, pivas-web, telegram4pivas, xray, xray-core\nInstalled-Size: 0\nDescription: Pivas 1.2.0-beta.1 complete bundle; Xray 26.3.27; activation is explicit\n"
         post = "#!/bin/sh\nset -e\n"
         for part in all_parts:
             if "postinst" in part[2]:
