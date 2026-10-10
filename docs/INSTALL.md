@@ -22,31 +22,32 @@ opkg print-architecture
 
 ### Скачать полный установщик
 
-| Архитектура Entware | Прямое скачивание |
-| --- | --- |
-| `mipsel-3.4` | [Скачать install-pivas-full.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-mipsel.sh) |
-| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-aarch64.sh) |
+| Архитектура Entware | Прямое скачивание | Команда запуска в SSH |
+| --- | --- | --- |
+| `mipsel-3.4` | [Скачать install-pivas-full-mipsel.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-mipsel.sh) | `sh /opt/tmp/install-pivas-full-mipsel.sh` |
+| `aarch64-3.10` (в том числе KN-1811) | [Скачать install-pivas-full-aarch64.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-aarch64.sh) | `sh /opt/tmp/install-pivas-full-aarch64.sh` |
 
-Это готовые установщики со встроенным полным пакетом. Выберите архитектуру по `opkg print-architecture`, скачайте файл и при передаче на роутер назовите его **`/opt/tmp/install-pivas-full.sh`**. Для новой установки достаточно одного подходящего `.sh` и доступа к репозиторию Entware.
+Это готовые установщики со встроенным полным пакетом. Выберите архитектуру по `opkg print-architecture`, скачайте подходящий файл и передайте его в **`/opt/tmp/`** роутера, сохранив имя. Переименовывать файл не нужно. Для новой установки достаточно одного подходящего `.sh` и доступа к репозиторию Entware.
 
 [Все файлы 1.2.0-beta.1](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.2.0-beta.1) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/SHA256SUMS)
 
 ## Полный установщик
 
-Используется только **`install-pivas-full.sh`**: один полный пакет с Pivas, Xray, QUIC-помощником, вебом и ботом. На странице релиза файлы имеют суффиксы `-mipsel` и `-aarch64`, чтобы различать архитектуры; на роутере выбранный файл можно назвать `install-pivas-full.sh`.
+Используется полный установщик своей архитектуры: **`install-pivas-full-mipsel.sh`** или **`install-pivas-full-aarch64.sh`**. Каждый содержит Pivas, Xray, QUIC-помощник, веб и бот. Сохраняйте исходное имя файла при передаче на роутер и запуске.
 
 Установщик содержит полный IPK и скачивает только зависимости Entware. Сам Entware и компоненты KeeneticOS нужно установить заранее. Веб и бот включаются отдельно по необходимости, хотя входят в общий комплект. Для обновления через Telegram опубликованы полные `pivas-full_*.ipk`.
 
 ## Порядок
 
 1. Скачайте полный установщик своей архитектуры по ссылке выше. Файл SHA256SUMS позволяет проверить скачанные файлы: `shasum -a 256 -c SHA256SUMS` на macOS или `sha256sum -c SHA256SUMS` на Linux (для полной проверки скачайте все перечисленные файлы).
-2. Передайте `install-pivas-full.sh` через SCP/SFTP в `/opt/tmp/` роутера. SSH Entware обычно работает на 222, когда системный SSH Keenetic занимает 22; используйте фактический порт своего устройства.
-3. Запустите:
+2. Передайте скачанный `install-pivas-full-mipsel.sh` или `install-pivas-full-aarch64.sh` без переименования через SCP/SFTP в `/opt/tmp/` роутера. SSH Entware обычно работает на 222, когда системный SSH Keenetic занимает 22; используйте фактический порт своего устройства.
+3. В SSH обновите список пакетов:
 
    ```sh
    opkg update
-   sh /opt/tmp/install-pivas-full.sh
    ```
+
+   Затем выполните **одну** команду запуска из таблицы выше — для своей архитектуры.
 
 4. Введите ссылки VLESS/Hysteria 2, токен и ID Telegram либо пропустите Enter. При вводе секретов символы не отображаются.
 5. Перейдите к [настройке](SETUP.md). Новая установка оставляет Pivas на паузе.
