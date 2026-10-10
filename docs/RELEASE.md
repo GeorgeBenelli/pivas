@@ -1,20 +1,18 @@
-# Подготовка релиза
+# Публикация релиза
 
-## Сборка и проверка
+Соберите пакет по [инструкции](DEVELOPMENT.md), проверьте `tests/verify_dist.py`, `tools/check_public.py` и результаты CI. Версии задаются в `build.py`.
 
-Следуйте [DEVELOPMENT.md](DEVELOPMENT.md): соберите бинарники, запустите `python build.py`, `python tests/verify_dist.py` и `python tools/package_release.py`. Версии компонентов задаются в `build.py` и попадают в манифест автоматически.
+Создайте тег на коммите выпуска. Используйте [русские](RELEASE_NOTES.md) и [английские](RELEASE_NOTES.en.md) примечания для описания; относительные ссылки замените ссылками на документы в GitHub.
 
-Проверьте `python tools/check_public.py`, результаты CI и [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). Условия компонентов различаются; вопрос лицензии исходного Telegram-бота описан отдельно.
+Прикрепите восемь файлов из `release-assets/`:
 
-## Публикуемые файлы
-
-| Файлы | Назначение |
+| Файл | Назначение |
 | --- | --- |
-| `install-pivas-full-mipsel.sh`, `install-pivas-full-aarch64.sh` | Новая установка полного комплекта |
-| Два `pivas-full_*.ipk` | Обновление через SSH или Telegram |
-| `manifest.json`, `SHA256SUMS` | Версии и проверка скачивания |
-| `LICENSE`, `THIRD_PARTY_NOTICES.md` | Лицензии и происхождение компонентов |
+| `install-pivas-full-mipsel.sh`, `install-pivas-full-aarch64.sh` | Установка |
+| Два `pivas-full_*.ipk` | Обновление |
+| `manifest.json`, `SHA256SUMS` | Версии и контрольные суммы |
+| `LICENSE`, `THIRD_PARTY_NOTICES.md` | Лицензии компонентов |
 
-Подготовьте тег на проверенном коммите и описание из [русских](RELEASE_NOTES.md) и [английских](RELEASE_NOTES.en.md) примечаний. Прикрепите восемь файлов из `release-assets/`. Workflow сборки только готовит artifact, публикация выполняется отдельно.
+Workflow сборки готовит файлы для скачивания из Actions. Сам релиз он не публикует.
 
-Отдельные установщики без веба и с модульными пакетами больше не выпускаются. Содержимое полного комплекта одинаково по функциям для обеих архитектур. Проверка CI не заменяет проверку запуска и маршрутизации на конкретном роутере.
+Перед распространением полного пакета нужно уточнить разрешение автора исходного Telegram-бота. Подробности — в [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).

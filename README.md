@@ -1,83 +1,60 @@
 # Pivas
 
-**Русский** · [English](README.en.md)
+Русский · [English](README.en.md)
 
-**Выборочная маршрутизация для Keenetic: два слота подключения, группы доменов, веб и Telegram.**
+Pivas направляет выбранные сайты и IP-сети через Xray на роутере Keenetic. Остальной трафик идёт через обычное подключение. Списками и подключениями можно управлять в вебе или Telegram.
 
-Pivas направляет выбранные сайты и IPv4-сети через Xray, а остальной трафик оставляет на обычном подключении. Управлять списками можно с компьютера, телефона или из Telegram.
+**1.2.0-beta.1** · Xray 26.3.27 · MIPSel / AArch64
 
-Текущий комплект: **1.2.0-beta.1 · Xray 26.3.27 · MIPSel / AArch64**. Это развивающийся проект: проверка на отдельных устройствах не означает совместимость со всеми моделями Keenetic.
+![Pivas](docs/images/dashboard-dark-demo.png)
 
-![Веб-интерфейс Pivas на демонстрационных данных](docs/images/dashboard-dark-demo.png)
-
-[Светлая тема](docs/images/dashboard-light-demo.png) · [Мобильный интерфейс](docs/images/dashboard-mobile-demo.png)
+[Светлая тема](docs/images/dashboard-light-demo.png) · [На телефоне](docs/images/dashboard-mobile-demo.png)
 
 ## Возможности
 
-- Два слота с собственными названиями и обменом ссылками одной кнопкой.
-- VLESS TCP + Reality, gRPC + TLS и XHTTP + TLS/Reality; Hysteria 2 с Salamander.
-- Отдельные домены и группы: создание, переименование, перенос между слотами, пауза и удаление.
-- IPv4-адреса и CIDR в тех же списках. Корневой домен охватывает поддомены.
-- DNS по спискам: выбранные домены — через DNSCrypt/DoH соответствующего слота, остальные — через штатный DNS Keenetic.
-- До **10 устройств без Pivas**, привязка исключения к MAC и получение списка устройств из Keenetic.
-- Веб с автоматической светлой/тёмной темой, мобильной версией и настройками бота.
-- Telegram: группы, слоты, веб, диагностика и установка совместимых IPK.
-- Зашифрованная резервная копия настроек, диагностика и измерение нагрузки.
+- Два подключения с отдельными списками сайтов. Ссылки можно поменять местами одной кнопкой.
+- VLESS: TCP + Reality, gRPC + TLS, XHTTP + TLS/Reality. Hysteria 2, в том числе с Salamander.
+- Группы доменов, отдельные домены, IPv4 и CIDR. Поддомены учитываются автоматически.
+- DNS для сайтов из списков — через их слот; для остальных — штатный DNS Keenetic.
+- До 10 устройств без Pivas. Исключения привязаны к MAC-адресу.
+- Управление группами и слотами, диагностика и обновление из Telegram.
+- Светлая и тёмная тема, резервные копии настроек, просмотр нагрузки.
 
 ## Установка
 
-Сначала установите Entware на исправный EXT4-накопитель и компоненты Keenetic **Proxy client**, **поддержка открытых пакетов**, **Netfilter**, **EXT**. Подробности и выбор архитектуры — в [docs/INSTALL.md](docs/INSTALL.md).
+Нужны Entware и компоненты KeeneticOS: Proxy client, поддержка открытых пакетов, Netfilter и EXT. Для USB-накопителя используйте EXT4. [Подробная инструкция](docs/INSTALL.md).
 
-### Скачать полный установщик
+Узнайте архитектуру в SSH Entware:
 
-| Архитектура Entware | Прямое скачивание | Команда запуска в SSH |
+```sh
+opkg print-architecture
+```
+
+Скачайте подходящий установщик и передайте его в `/opt/tmp/`, сохранив имя. Выполните `opkg update`, затем **одну** команду из таблицы:
+
+| Архитектура Entware | Установщик | Команда |
 | --- | --- | --- |
-| `mipsel-3.4` | [Скачать install-pivas-full-mipsel.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-mipsel.sh) | `sh /opt/tmp/install-pivas-full-mipsel.sh` |
-| `aarch64-3.10` | [Скачать install-pivas-full-aarch64.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-aarch64.sh) | `sh /opt/tmp/install-pivas-full-aarch64.sh` |
+| `mipsel-3.4` | [install-pivas-full-mipsel.sh](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-mipsel.sh) | `sh /opt/tmp/install-pivas-full-mipsel.sh` |
+| `aarch64-3.10` | [install-pivas-full-aarch64.sh](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-aarch64.sh) | `sh /opt/tmp/install-pivas-full-aarch64.sh` |
 
-Это готовые установщики со встроенным полным пакетом. Выберите архитектуру по `opkg print-architecture`, скачайте подходящий файл и передайте его в **`/opt/tmp/`** роутера, сохранив имя. Переименовывать файл не нужно. Для новой установки достаточно одного подходящего `.sh` и доступа к репозиторию Entware.
+Установщик попросит ссылки подключений, токен бота и ID администратора. Поля можно пропустить Enter и заполнить позже. Веб, бот и маршрутизация включаются отдельно.
 
-[Все файлы 1.2.0-beta.1](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.2.0-beta.1) · [SHA256SUMS](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/SHA256SUMS)
-
-В SSH-сессии Entware обновите список пакетов:
+Чтобы продолжить настройку в вебе:
 
 ```sh
-opkg update
+pivas web on 'ВАШ_ПАРОЛЬ'
 ```
 
-Затем выполните команду запуска из таблицы для своей архитектуры.
+Откройте `http://АДРЕС_РОУТЕРА:8888`, логин `admin`. Добавьте ссылку, создайте группу и включите Pivas. Из SSH: `pivas start`.
 
-Установщик предложит ссылки слотов, токен Telegram и ID администратора. Можно пропустить поля Enter и заполнить их позже. На чистой установке маршрутизация, веб и бот не включаются автоматически.
-
-Для настройки через веб:
-
-```sh
-pivas web on 'ЗАМЕНИТЕ_НА_СВОЙ_ПАРОЛЬ'
-```
-
-Откройте `http://АДРЕС_РОУТЕРА:8888`, логин **admin**. Сохраните ссылку, создайте группу с доменами и включите Pivas. В CLI запуск выполняется командой `pivas start`.
+Для обновления скачайте полный `.ipk` своей архитектуры из [релиза](https://github.com/Georgy-Benelli/pivas/releases/tag/v1.2.0-beta.1). В боте: «Сервис → Обновить пакет». [Обновление через SSH и Telegram](docs/UPDATING.md).
 
 ## Документация
 
-| Задача | Инструкция |
-| --- | --- |
-| Чистая установка, Entware и выбор пакета | [Установка](docs/INSTALL.md) |
-| Слоты, группы, устройства и бот | [Настройка](docs/SETUP.md) |
-| DNS, маршруты и ограничения | [Архитектура](docs/ARCHITECTURE.md) |
-| Обновление через SSH или Telegram | [Обновление](docs/UPDATING.md) |
-| Не открываются сайты, не запускается служба | [Диагностика](docs/TROUBLESHOOTING.md) |
-| Сборка, тесты и демо веба | [Разработка](docs/DEVELOPMENT.md) |
-| Изменения 1.2.0-beta.1 | [История версий](docs/CHANGELOG.md) |
-| Происхождение стороннего кода | [Лицензии и авторы](THIRD_PARTY_NOTICES.md) |
+[Настройка](docs/SETUP.md) · [DNS и маршруты](docs/ARCHITECTURE.md) · [Решение проблем](docs/TROUBLESHOOTING.md) · [Сборка](docs/DEVELOPMENT.md) · [История изменений](docs/CHANGELOG.md)
 
-## Что важно знать
+Маршрутизация работает с IPv4. IPv6 и собственный DoH браузера могут обходить правила. Веб предназначен для локальной сети — порт 8888 не следует открывать в интернет. [Безопасность](SECURITY.md).
 
-Маршрутизация в этой версии рассчитана на **IPv4**. IPv6 и собственный DoH приложений могут обойти доменные правила. Не заявляется полная защита от любых DNS-утечек. Веб работает по HTTP в локальной сети; не публикуйте порт 8888 в интернет. Детали — в [SECURITY.md](SECURITY.md).
+## Исходные проекты
 
-Бот и веб устанавливаются вместе с полным пакетом, но их можно включать отдельно. Hysteria 2 работает внутри Xray; отдельная постоянно работающая служба Hysteria не нужна.
-
-## Разработка и происхождение
-
-Исходники, тесты и средства сборки находятся в этом репозитории. Бинарники и установщики распространяются отдельно через Releases; они не нужны для запуска модульных тестов.
-
-Pivas развивает код [KVAS](https://github.com/qzeleza/kvas) и [telegram4kvas](https://github.com/dnstkrv/telegram4kvas), использует Xray и pyTelegramBotAPI. Название продукта изменено; авторство исходных компонентов сохранено. Условия компонентов различаются: [LICENSE](LICENSE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Pivas основан на [KVAS](https://github.com/qzeleza/kvas) и [telegram4kvas](https://github.com/dnstkrv/telegram4kvas), использует Xray и pyTelegramBotAPI. Лицензии компонентов и вопрос разрешения на распространение исходного бота описаны в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) и [LICENSE](LICENSE).
