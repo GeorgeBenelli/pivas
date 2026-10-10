@@ -29,6 +29,7 @@ Each installer embeds the complete package. Check `opkg print-architecture`, dow
 - `install-pivas-full-mipsel.sh` / `install-pivas-full-aarch64.sh` — the complete installer for a fresh installation.
 - `pivas-full_...ipk` — the complete package for updates over SSH or Telegram.
 - `SHA256SUMS` and `manifest.json` — checksums and component versions.
+- `LICENSE` and `THIRD_PARTY_NOTICES.md` — licensing and component provenance.
 
 Choose the architecture shown by `opkg print-architecture`. Entware, EXT, Netfilter and Proxy client are prerequisites. Configure the connection URLs and explicitly enable Pivas after installation; enable the web interface and bot when needed.
 

@@ -22,6 +22,8 @@ def main():
         package = next((dist / arch).glob('pivas-full_*.ipk'))
         selected[package.name] = package
         selected['install-pivas-full-' + arch + '.sh'] = dist / arch / 'install-pivas-full.sh'
+    for name in ('LICENSE', 'THIRD_PARTY_NOTICES.md'):
+        selected[name] = ROOT / name
     out = ROOT / 'release-assets'
     if out.is_symlink():
         raise ValueError('Release output must not be a symlink')
@@ -36,8 +38,8 @@ def main():
     (out / 'manifest.json').write_text(json.dumps(public_manifest, indent=2) + '\n')
     digests['manifest.json'] = hashlib.sha256((out / 'manifest.json').read_bytes()).hexdigest()
     (out / 'SHA256SUMS').write_text(''.join(digest + '  ' + name + '\n' for name, digest in sorted(digests.items())))
-    print('Prepared 6 release files:', out)
-    print('Two full installers, two full update IPKs, manifest.json and SHA256SUMS. Not published.')
+    print('Prepared 8 release files:', out)
+    print('Two full installers, two full update IPKs, two license notices, manifest.json and SHA256SUMS. Not published.')
 
 
 if __name__ == '__main__':

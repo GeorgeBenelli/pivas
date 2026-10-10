@@ -29,6 +29,7 @@
 - `install-pivas-full-mipsel.sh` / `install-pivas-full-aarch64.sh` — полный установщик для новой установки.
 - `pivas-full_...ipk` — полный пакет для обновления через SSH или Telegram.
 - `SHA256SUMS` и `manifest.json` — контрольные суммы и версии компонентов.
+- `LICENSE` и `THIRD_PARTY_NOTICES.md` — лицензии и происхождение компонентов.
 
 Архитектуру определяйте по `opkg print-architecture`. Требуются Entware, EXT, Netfilter и Proxy client. После установки настройте ссылки и явно запустите Pivas; веб и бот включаются отдельно.
 
