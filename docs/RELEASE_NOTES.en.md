@@ -18,7 +18,7 @@ The new `pivas repair-dns` command checks these files. Diagnostic reports includ
 | Entware architecture | Direct download | Run over SSH |
 | --- | --- | --- |
 | `mipsel-3.4` | [Download install-pivas-full-mipsel.sh — MIPSel](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-mipsel.sh) | `sh /opt/tmp/install-pivas-full-mipsel.sh` |
-| `aarch64-3.10` (including KN-1811) | [Download install-pivas-full-aarch64.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-aarch64.sh) | `sh /opt/tmp/install-pivas-full-aarch64.sh` |
+| `aarch64-3.10` | [Download install-pivas-full-aarch64.sh — AArch64](https://github.com/Georgy-Benelli/pivas/releases/download/v1.2.0-beta.1/install-pivas-full-aarch64.sh) | `sh /opt/tmp/install-pivas-full-aarch64.sh` |
 
 Each installer embeds the complete package. Check `opkg print-architecture`, download the matching file and copy it to **`/opt/tmp/`** on the router, keeping its original filename. No renaming is needed. A fresh installation needs only that `.sh` file and access to the Entware repository.
 
